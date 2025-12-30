@@ -1,0 +1,4 @@
+.vscode/
+protein_triplets_data/
+model_best_loss.pt
+wandb/
