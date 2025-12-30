@@ -1,4 +1,6 @@
-protein_triplets_data\negatives
-protein_triplets_data\originals
-protein_triplets_data\positives
-protein_triplets_data\processed
+protein_triplets_data/
+wandb/
+model_best_loss.pt
+.vscode/
+protein_triplets_data/negatives/
+protein_triplets_data/positives/
