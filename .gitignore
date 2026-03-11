@@ -4,3 +4,16 @@ model_best_loss.pt
 .vscode/
 protein_triplets_data/negatives/
 protein_triplets_data/positives/
+sadece_graph_ouşturma.py
+tests.ipynb
+zip_back_to_drive.py
+.claude/settings.local.json
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+_cell_*.py
+contvar_v0.ipynb
+sequence_model/
+requirements.txt
