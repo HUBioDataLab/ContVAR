@@ -59,12 +59,11 @@ class ProjectConfig:
         self.hidden_dim = 64
         self.output_dim = 256
         self.heads = 4
-        self.dropout = 0.0
-        self.lr = 0.0005
-        self.weight_decay = 1e-5
+        self.lr = 1e-4
+        self.weight_decay = 0.01
         self.batch_size = 8
-        self.epochs = 100
-        self.margin = 0.2
+        self.epochs = 200
+        self.margin = 0.3
 
         # Loss Function Configuration
         self.loss_type = "semi_hard"
@@ -173,7 +172,7 @@ def setup_environment(data_root=None, embeddings_path=None, data_zip=None):
 
     if is_colab:
         if data_root is None:
-            data_root = "/content/content/protein_triplets_data"
+            data_root = "/content/content/content/protein_triplets_data"
         if embeddings_path is None:
             embeddings_path = "/content/drive/MyDrive/ContVAR/embeddings_variable.h5"
         if data_zip is None:

@@ -5,19 +5,20 @@ from torch_geometric.nn import GATv2Conv, global_mean_pool
 
 
 class DeepProteinGAT(nn.Module):
-    """3-layer GATv2 model with edge features, dropout, normalization and strong projection head.
+    """Single-layer GATv2 model with residual connection, edge features,
+    and clean projection heads for metric learning.
 
     This model supports both edge construction modes:
     - SALAD-style edges: RBF distance encoding + neighbor type + sequence distance (edge_dim=20)
     - Graphein edges: edge type one-hot + euclidean distance (edge_dim=9)
     """
 
-    def __init__(self, input_dim, hidden_dim, output_dim, heads=4, dropout=0.0,
+    def __init__(self, input_dim, hidden_dim, output_dim, heads=4,
                  edge_dim=20, projection_hidden_dim=None):
         super().__init__()
 
-        self.dropout = dropout
         self.edge_dim = edge_dim
+        conv_out_dim = hidden_dim * heads
 
         if projection_hidden_dim is None:
             projection_hidden_dim = output_dim * 2
@@ -29,38 +30,24 @@ class DeepProteinGAT(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Layer 1
+        # Single GATv2 layer
         self.conv1 = GATv2Conv(input_dim, hidden_dim, heads=heads, concat=True,
                                dropout=0.0, edge_dim=hidden_dim)
-        self.norm1 = nn.LayerNorm(hidden_dim * heads)
+        self.norm1 = nn.LayerNorm(conv_out_dim)
 
-        # Layer 2
-        self.conv2 = GATv2Conv(hidden_dim * heads, hidden_dim, heads=heads, concat=True,
-                               dropout=0.0, edge_dim=hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim * heads)
+        # Residual projection (match input_dim → conv_out_dim)
+        self.input_proj = nn.Linear(input_dim, conv_out_dim)
 
-        # Layer 3
-        self.conv3 = GATv2Conv(hidden_dim * heads, output_dim, heads=1, concat=False,
-                               dropout=0.0, edge_dim=hidden_dim)
-        self.norm3 = nn.LayerNorm(output_dim)
-
-        # Strong MLP Projection Head for Metric Learning (global)
+        # Projection heads (no BatchNorm, no Dropout — L2 normalize at output handles scale)
         self.projection = nn.Sequential(
-            nn.Linear(output_dim, projection_hidden_dim),
-            nn.BatchNorm1d(projection_hidden_dim),
+            nn.Linear(conv_out_dim, projection_hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
             nn.Linear(projection_hidden_dim, output_dim),
-            nn.BatchNorm1d(output_dim)
         )
-        # Projection head for local (mutation-position) embedding
         self.projection_local = nn.Sequential(
-            nn.Linear(output_dim, projection_hidden_dim),
-            nn.BatchNorm1d(projection_hidden_dim),
+            nn.Linear(conv_out_dim, projection_hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Dropout(p=dropout),
             nn.Linear(projection_hidden_dim, output_dim),
-            nn.BatchNorm1d(output_dim)
         )
 
     def forward(self, data, mut_pos=None):
@@ -75,19 +62,16 @@ class DeepProteinGAT(nn.Module):
         else:
             edge_embed = None
 
+        # Residual: project original ESM2 features to match conv output dim
+        x_residual = self.input_proj(x)
+
+        # Single GATv2 layer with residual connection
         x = self.conv1(x, edge_index, edge_attr=edge_embed)
         x = self.norm1(x)
+        x = x + x_residual
         x = F.elu(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
 
-        x = self.conv2(x, edge_index, edge_attr=edge_embed)
-        x = self.norm2(x)
-        x = F.elu(x)
-        x = F.dropout(x, p=self.dropout, training=self.training)
-
-        x = self.conv3(x, edge_index, edge_attr=edge_embed)
-        x = self.norm3(x)
-
+        # Global embedding
         x_global = global_mean_pool(x, batch)
         x_global = self.projection(x_global)
         x_global = F.normalize(x_global, p=2, dim=1)

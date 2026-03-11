@@ -7,7 +7,8 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch
 from torch_geometric.nn import global_mean_pool
 from tqdm import tqdm
-import plotly.express as px
+import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 from sklearn.manifold import TSNE
 
 from contvar.config import ProjectConfig
@@ -118,35 +119,76 @@ def extract_embeddings_for_tsne(model, mapper, split, processed_dir,
     return global_embs, local_embs, meta, None, None
 
 
+_ROLE_STYLE = {
+    "negative": {"color": "tab:red",   "marker": "o", "label": "Bad mutant", "zorder": 1},
+    "positive": {"color": "tab:green", "marker": "o", "label": "Good mutant", "zorder": 2},
+    "anchor":   {"color": "tab:orange","marker": "*", "label": "WT",          "zorder": 3},
+}
+
+_ROLE_SIZE = {"negative": 30, "positive": 30, "anchor": 120}
+
+
+def _plot_panel(ax, coords_2d, meta, title):
+    """Draw a single t-SNE scatter panel on *ax*."""
+    for role in ("negative", "positive", "anchor"):
+        style = _ROLE_STYLE[role]
+        idxs = [i for i, m in enumerate(meta) if m["role"] == role]
+        if not idxs:
+            continue
+        ax.scatter(
+            coords_2d[idxs, 0],
+            coords_2d[idxs, 1],
+            c=style["color"],
+            marker=style["marker"],
+            s=_ROLE_SIZE[role],
+            alpha=0.7,
+            edgecolors="none",
+            zorder=style["zorder"],
+        )
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_xlabel("t-SNE 1")
+    ax.set_ylabel("t-SNE 2")
+    ax.grid(True, linewidth=0.3, alpha=0.5)
+
+
+def _make_legend_handles():
+    handles = []
+    for role in ("negative", "positive", "anchor"):
+        s = _ROLE_STYLE[role]
+        count_label = s["label"]
+        handles.append(
+            mlines.Line2D([], [], color=s["color"], marker=s["marker"],
+                          linestyle="None", markersize=8 if role != "anchor" else 12,
+                          label=count_label)
+        )
+    return handles
+
+
+def plot_tsne_side_by_side(bl_2d, proj_2d, meta, suptitle,
+                           left_title="Baseline (Raw ESM)",
+                           right_title="Projected"):
+    """Side-by-side baseline vs projected t-SNE (matplotlib)."""
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(16, 7))
+    fig.suptitle(suptitle, fontsize=14, fontweight="bold", y=1.02)
+
+    _plot_panel(ax_l, bl_2d, meta, left_title)
+    _plot_panel(ax_r, proj_2d, meta, right_title)
+
+    handles = _make_legend_handles()
+    ax_r.legend(handles=handles, loc="upper right", fontsize=9, framealpha=0.8)
+
+    fig.tight_layout()
+    plt.show()
+
+
 def plot_tsne(coords_2d, meta, title):
-    """Create a plotly scatter with color=protein, symbol=role."""
-    df = pd.DataFrame({
-        "t-SNE 1": coords_2d[:, 0],
-        "t-SNE 2": coords_2d[:, 1],
-        "Protein": [m["protein"] for m in meta],
-        "Role": [m["role"] for m in meta],
-    })
-
-    role_order = {"negative": 0, "positive": 1, "anchor": 2}
-    df["_order"] = df["Role"].map(role_order)
-    df = df.sort_values("_order").drop(columns="_order").reset_index(drop=True)
-
-    symbol_map = {"anchor": "diamond", "positive": "circle", "negative": "x"}
-
-    fig = px.scatter(
-        df,
-        x="t-SNE 1",
-        y="t-SNE 2",
-        color="Protein",
-        symbol="Role",
-        symbol_map=symbol_map,
-        title=title,
-        hover_data=["Protein", "Role"],
-        category_orders={"Role": ["negative", "positive", "anchor"]},
-    )
-    fig.update_traces(marker=dict(size=10, line=dict(width=0.5, color="DarkSlateGrey")))
-    fig.update_layout(width=1100, height=800, legend=dict(font=dict(size=9)))
-    fig.show()
+    """Single-panel t-SNE plot (matplotlib)."""
+    fig, ax = plt.subplots(figsize=(9, 7))
+    _plot_panel(ax, coords_2d, meta, title)
+    handles = _make_legend_handles()
+    ax.legend(handles=handles, loc="upper right", fontsize=9, framealpha=0.8)
+    fig.tight_layout()
+    plt.show()
 
 
 def visualize_tsne(model=None,
@@ -214,20 +256,28 @@ def visualize_tsne(model=None,
             random_state=random_state, n_iter=1000,
         )
 
-        if show_baseline and bl_global is not None:
-            print("Computing baseline t-SNE (raw pooled features, no GNN)...")
-            bl_global_2d = TSNE(**tsne_kwargs).fit_transform(bl_global)
-            plot_tsne(bl_global_2d, meta,
-                      f"BASELINE — Global Pooled Features t-SNE ({split})")
-
-            bl_local_2d = TSNE(**tsne_kwargs).fit_transform(bl_local)
-            plot_tsne(bl_local_2d, meta,
-                      f"BASELINE — Local Pooled Features t-SNE ({split})")
-
-        print("Computing trained-model t-SNE...")
+        print("Computing t-SNE projections...")
         global_2d = TSNE(**tsne_kwargs).fit_transform(global_embs)
-        plot_tsne(global_2d, meta,
-                  f"TRAINED — Global Embeddings t-SNE ({split})")
-
         local_2d = TSNE(**tsne_kwargs).fit_transform(local_embs)
-        plot_tsne(local_2d, meta, f"TRAINED — Local Embeddings t-SNE ({split})")
+
+        if show_baseline and bl_global is not None:
+            bl_global_2d = TSNE(**tsne_kwargs).fit_transform(bl_global)
+            bl_local_2d = TSNE(**tsne_kwargs).fit_transform(bl_local)
+
+            plot_tsne_side_by_side(
+                bl_global_2d, global_2d, meta,
+                suptitle=f"t-SNE Embedding Visualization — Global ({split})",
+                left_title="Baseline Global (Raw ESM)",
+                right_title="Projected Global",
+            )
+            plot_tsne_side_by_side(
+                bl_local_2d, local_2d, meta,
+                suptitle=f"t-SNE Embedding Visualization — Local ({split})",
+                left_title="Baseline Local (Raw ESM)",
+                right_title="Projected Local",
+            )
+        else:
+            plot_tsne(global_2d, meta,
+                      f"Projected Global t-SNE ({split})")
+            plot_tsne(local_2d, meta,
+                      f"Projected Local t-SNE ({split})")

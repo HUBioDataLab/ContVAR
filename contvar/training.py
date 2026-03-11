@@ -21,10 +21,12 @@ from contvar.metrics import compute_detailed_metrics, compute_embedding_stats
 from contvar.utils import load_all_embeddings
 
 
-def evaluate(model, loader, criterion, device):
-    """Evaluate model on a given dataloader - vectorized version"""
+def evaluate(model, loader, criterion, device, margin=0.3):
+    """Evaluate model on a given dataloader with both global and local loss"""
     model.eval()
     total_loss = 0
+    total_loss_g = 0
+    total_loss_l = 0
     valid_batches = 0
     all_metrics = []
 
@@ -41,17 +43,50 @@ def evaluate(model, loader, criterion, device):
             mut_pos_positive = mut_pos_positive.to(device)
             mut_pos_negatives = mut_pos_negatives.to(device)
 
+            # Global embeddings
             ea_g, _ = model(ba)
-            ep_g, _ = model(bp, mut_pos=mut_pos_positive)
-            en_g, _ = model(bn, mut_pos=mut_pos_negatives)
+            ep_g, ep_l = model(bp, mut_pos=mut_pos_positive)
+            en_g, en_l = model(bn, mut_pos=mut_pos_negatives)
 
-            loss, neg_dist, en_neg, mining_stats = criterion(ea_g, ep_g, en_g, neg_counts)
+            # Global loss
+            loss_g, neg_dist, en_neg, mining_stats = criterion(ea_g, ep_g, en_g, neg_counts)
+
+            # Local loss
+            hardest_indices = mining_stats["hardest_indices"]
+            cumsum = torch.cat([torch.tensor([0], device=device), neg_counts.cumsum(0)[:-1]])
+            flat_idx = cumsum + hardest_indices
+            mut_pos_neg_selected = mut_pos_negatives[flat_idx]
+
+            _, la_at_pos = model(ba, mut_pos=mut_pos_positive)
+            _, la_at_neg = model(ba, mut_pos=mut_pos_neg_selected)
+            zn_l_selected = en_l[flat_idx]
+
+            B = la_at_pos.size(0)
+            z_wt_l = torch.cat([la_at_pos, la_at_neg], dim=0)
+            z_mut_l = torch.cat([ep_l, zn_l_selected], dim=0)
+            lbl = torch.cat([
+                torch.ones(B, device=device),
+                torch.zeros(B, device=device)
+            ])
+
+            d_local = F.pairwise_distance(z_wt_l, z_mut_l, p=2)
+            loss_attract = lbl * (d_local ** 2)
+            loss_repel = (1.0 - lbl) * (F.relu(margin - d_local) ** 2)
+            loss_l = (loss_attract + loss_repel).mean()
+
+            # Combined loss
+            loss = (loss_g + loss_l) / 2
+
             total_loss += loss.item()
+            total_loss_g += loss_g.item()
+            total_loss_l += loss_l.item()
             valid_batches += 1
 
             k_vals = [1, 5] if len(ea_g) >= 5 else [1]
             batch_metrics = compute_detailed_metrics(ea_g, ep_g, en_neg, top_k=k_vals)
             batch_metrics["loss"] = loss.item()
+            batch_metrics["loss_g"] = loss_g.item()
+            batch_metrics["loss_l"] = loss_l.item()
             all_metrics.append(batch_metrics)
 
     avg_loss = total_loss / valid_batches if valid_batches > 0 else 0
@@ -186,13 +221,12 @@ def train_pipeline(config=None, force=False, split_path=None,
         hidden_dim=cfg.hidden_dim,
         output_dim=cfg.output_dim,
         heads=cfg.heads,
-        dropout=cfg.dropout,
         edge_dim=cfg.edge_attr_dim
     ).to(device)
 
     wandb.watch(model, log="gradients", log_freq=50)
 
-    optimizer = optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     standard_criterion = StandardTripletLoss(margin=cfg.margin)
     semihard_criterion = SemiHardMiningTripletLoss(margin=cfg.margin)
@@ -474,7 +508,7 @@ def train_pipeline(config=None, force=False, split_path=None,
         # =====================================================================
         # VALIDATION
         # =====================================================================
-        val_metrics = evaluate(model, phase1_val_loader, val_criterion, device)
+        val_metrics = evaluate(model, phase1_val_loader, val_criterion, device, margin=cfg.margin)
 
         embedding_stats = compute_embedding_stats(
             model, phase1_val_loader, device, val_criterion, max_batches=20
@@ -487,6 +521,8 @@ def train_pipeline(config=None, force=False, split_path=None,
             "train/epoch_Simple_Acc": train_epoch_metrics.get("Simple_Acc", 0),
             "train/epoch_MRR": train_epoch_metrics.get("MRR", 0),
             "val/loss": val_metrics.get("loss", 0),
+            "val/loss_g": val_metrics.get("loss_g", 0),
+            "val/loss_l": val_metrics.get("loss_l", 0),
             "val/AUROC": val_metrics.get("AUROC", 0),
             "val/Simple_Acc": val_metrics.get("Simple_Acc", 0),
             "val/MRR": val_metrics.get("MRR", 0),
