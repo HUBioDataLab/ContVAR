@@ -14,7 +14,7 @@ class SemiHardMiningTripletLoss(nn.Module):
     if no hard/semi-hard negatives are found.
     """
 
-    def __init__(self, margin=0.2):
+    def __init__(self, margin=0.3):
         super().__init__()
         self.margin = margin
 
@@ -131,9 +131,9 @@ class SemiHardMiningTripletLoss(nn.Module):
 
 
 class StandardTripletLoss(nn.Module):
-    """Wrapper for PyTorch's TripletMarginLoss - handles both old and new collate formats"""
+    """Wrapper for PyTorch's TripletMarginLoss alternative when no hard/semi-hard mining is desired."""
 
-    def __init__(self, margin=0.2, p=2):
+    def __init__(self, margin=0.3, p=2):
         super().__init__()
         self.triplet_loss = nn.TripletMarginLoss(margin=margin, p=p, reduction='mean')
 

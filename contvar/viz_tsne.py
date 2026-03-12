@@ -119,48 +119,81 @@ def extract_embeddings_for_tsne(model, mapper, split, processed_dir,
     return global_embs, local_embs, meta, None, None
 
 
-_ROLE_STYLE = {
-    "negative": {"color": "tab:red",   "marker": "o", "label": "Bad mutant", "zorder": 1},
-    "positive": {"color": "tab:green", "marker": "o", "label": "Good mutant", "zorder": 2},
-    "anchor":   {"color": "tab:orange","marker": "*", "label": "WT",          "zorder": 3},
-}
-
 _ROLE_SIZE = {"negative": 30, "positive": 30, "anchor": 120}
 
 
+def _build_protein_color_map(meta):
+    """Assign each protein a unique green tone (positive) and red tone (negative)."""
+    proteins = list(dict.fromkeys(m["protein"] for m in meta))
+    n = max(len(proteins), 1)
+
+    # Generate distinct tones across green and red hue ranges
+    green_cmap = plt.cm.Greens
+    red_cmap = plt.cm.Reds
+    # Sample from 0.35..0.9 to avoid too-light and too-dark extremes
+    positions = np.linspace(0.35, 0.9, n)
+
+    color_map = {}  # (protein, role) -> color
+    for i, pid in enumerate(proteins):
+        color_map[(pid, "positive")] = green_cmap(positions[i])
+        color_map[(pid, "negative")] = red_cmap(positions[i])
+        color_map[(pid, "anchor")] = "gold"
+
+    return proteins, color_map
+
+
 def _plot_panel(ax, coords_2d, meta, title):
-    """Draw a single t-SNE scatter panel on *ax*."""
-    for role in ("negative", "positive", "anchor"):
-        style = _ROLE_STYLE[role]
-        idxs = [i for i, m in enumerate(meta) if m["role"] == role]
-        if not idxs:
-            continue
-        ax.scatter(
-            coords_2d[idxs, 0],
-            coords_2d[idxs, 1],
-            c=style["color"],
-            marker=style["marker"],
-            s=_ROLE_SIZE[role],
-            alpha=0.7,
-            edgecolors="none",
-            zorder=style["zorder"],
-        )
+    """Draw a single t-SNE scatter panel on *ax* with per-protein coloring."""
+    proteins, color_map = _build_protein_color_map(meta)
+
+    # Draw negatives first, then positives, then anchors (z-order)
+    for role, zorder in [("negative", 1), ("positive", 2), ("anchor", 3)]:
+        marker = "*" if role == "anchor" else "o"
+        for pid in proteins:
+            idxs = [i for i, m in enumerate(meta)
+                    if m["role"] == role and m["protein"] == pid]
+            if not idxs:
+                continue
+            ax.scatter(
+                coords_2d[idxs, 0],
+                coords_2d[idxs, 1],
+                c=[color_map[(pid, role)]],
+                marker=marker,
+                s=_ROLE_SIZE[role],
+                alpha=0.7,
+                edgecolors="none",
+                zorder=zorder,
+            )
+
     ax.set_title(title, fontsize=12, fontweight="bold")
     ax.set_xlabel("t-SNE 1")
     ax.set_ylabel("t-SNE 2")
     ax.grid(True, linewidth=0.3, alpha=0.5)
 
 
-def _make_legend_handles():
+def _make_legend_handles(meta):
+    """Build legend handles: one entry per protein with green/red tones, plus WT."""
+    proteins, color_map = _build_protein_color_map(meta)
+    roles_present = {m["role"] for m in meta}
     handles = []
-    for role in ("negative", "positive", "anchor"):
-        s = _ROLE_STYLE[role]
-        count_label = s["label"]
+
+    for pid in proteins:
+        if "positive" in roles_present:
+            handles.append(
+                mlines.Line2D([], [], color=color_map[(pid, "positive")],
+                              marker="o", linestyle="None", markersize=8,
+                              label=f"{pid} (good)"))
+        if "negative" in roles_present:
+            handles.append(
+                mlines.Line2D([], [], color=color_map[(pid, "negative")],
+                              marker="o", linestyle="None", markersize=8,
+                              label=f"{pid} (bad)"))
+
+    if "anchor" in roles_present:
         handles.append(
-            mlines.Line2D([], [], color=s["color"], marker=s["marker"],
-                          linestyle="None", markersize=8 if role != "anchor" else 12,
-                          label=count_label)
-        )
+            mlines.Line2D([], [], color="gold", marker="*",
+                          linestyle="None", markersize=12, label="WT"))
+
     return handles
 
 
@@ -174,8 +207,9 @@ def plot_tsne_side_by_side(bl_2d, proj_2d, meta, suptitle,
     _plot_panel(ax_l, bl_2d, meta, left_title)
     _plot_panel(ax_r, proj_2d, meta, right_title)
 
-    handles = _make_legend_handles()
-    ax_r.legend(handles=handles, loc="upper right", fontsize=9, framealpha=0.8)
+    handles = _make_legend_handles(meta)
+    ax_r.legend(handles=handles, loc="upper right", fontsize=7,
+                framealpha=0.8, ncol=2)
 
     fig.tight_layout()
     plt.show()
@@ -185,8 +219,9 @@ def plot_tsne(coords_2d, meta, title):
     """Single-panel t-SNE plot (matplotlib)."""
     fig, ax = plt.subplots(figsize=(9, 7))
     _plot_panel(ax, coords_2d, meta, title)
-    handles = _make_legend_handles()
-    ax.legend(handles=handles, loc="upper right", fontsize=9, framealpha=0.8)
+    handles = _make_legend_handles(meta)
+    ax.legend(handles=handles, loc="upper right", fontsize=7,
+              framealpha=0.8, ncol=2)
     fig.tight_layout()
     plt.show()
 
@@ -257,11 +292,25 @@ def visualize_tsne(model=None,
 
         print("Computing t-SNE projections...")
         global_2d = TSNE(**tsne_kwargs).fit_transform(global_embs)
-        local_2d = TSNE(**tsne_kwargs).fit_transform(local_embs)
+
+        # For local plots, exclude anchors (they have no mutation position,
+        # so their "local" embedding is just the global one — misleading).
+        local_idxs = [i for i, m in enumerate(meta) if m["role"] != "anchor"]
+        local_meta = [meta[i] for i in local_idxs]
+        local_embs_filtered = local_embs[local_idxs]
 
         if show_baseline and bl_global is not None:
             bl_global_2d = TSNE(**tsne_kwargs).fit_transform(bl_global)
-            bl_local_2d = TSNE(**tsne_kwargs).fit_transform(bl_local)
+            bl_local_filtered = bl_local[local_idxs]
+
+            # Recompute t-SNE for local with filtered points
+            local_perp = min(perplexity, len(local_meta) - 1)
+            local_tsne_kwargs = dict(
+                n_components=2, perplexity=local_perp,
+                random_state=random_state, n_iter=1000,
+            )
+            local_2d = TSNE(**local_tsne_kwargs).fit_transform(local_embs_filtered)
+            bl_local_2d = TSNE(**local_tsne_kwargs).fit_transform(bl_local_filtered)
 
             plot_tsne_side_by_side(
                 bl_global_2d, global_2d, meta,
@@ -270,13 +319,14 @@ def visualize_tsne(model=None,
                 right_title="Projected Global",
             )
             plot_tsne_side_by_side(
-                bl_local_2d, local_2d, meta,
+                bl_local_2d, local_2d, local_meta,
                 suptitle=f"t-SNE Embedding Visualization — Local ({split})",
                 left_title="Baseline Local (Raw ESM)",
                 right_title="Projected Local",
             )
         else:
+            local_2d = TSNE(**tsne_kwargs).fit_transform(local_embs_filtered)
             plot_tsne(global_2d, meta,
                       f"Projected Global t-SNE ({split})")
-            plot_tsne(local_2d, meta,
+            plot_tsne(local_2d, local_meta,
                       f"Projected Local t-SNE ({split})")
