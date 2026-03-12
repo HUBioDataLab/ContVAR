@@ -62,7 +62,7 @@ class ProjectConfig:
         self.lr = 1e-4
         self.weight_decay = 0.01
         self.batch_size = 8
-        self.epochs = 200
+        self.epochs = 300
         self.margin = 0.3
 
         # Loss Function Configuration
@@ -73,9 +73,10 @@ class ProjectConfig:
         self.mining_chunk_size = 10
 
         # Curriculum Learning Configuration
-        self.curriculum_warmup_epochs = 1
+        self.curriculum_warmup_epochs = 0
         self.warmup_batch_size = 32
         self.mining_batch_size = 8
+        self.grad_accumulation_steps = 4
         self.num_workers = 8
 
         # Phase 1 Intra-Epoch Early Stopping

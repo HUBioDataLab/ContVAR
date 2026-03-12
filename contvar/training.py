@@ -43,8 +43,8 @@ def evaluate(model, loader, criterion, device, margin=0.3):
             mut_pos_positive = mut_pos_positive.to(device)
             mut_pos_negatives = mut_pos_negatives.to(device)
 
-            # Global embeddings
-            ea_g, _ = model(ba)
+            # Forward anchor ONCE, reuse node features for local extraction
+            ea_g, ea_l_pos, anchor_ctx = model.forward_with_nodes(ba, mut_pos=mut_pos_positive)
             ep_g, ep_l = model(bp, mut_pos=mut_pos_positive)
             en_g, en_l = model(bn, mut_pos=mut_pos_negatives)
 
@@ -57,8 +57,9 @@ def evaluate(model, loader, criterion, device, margin=0.3):
             flat_idx = cumsum + hardest_indices
             mut_pos_neg_selected = mut_pos_negatives[flat_idx]
 
-            _, la_at_pos = model(ba, mut_pos=mut_pos_positive)
-            _, la_at_neg = model(ba, mut_pos=mut_pos_neg_selected)
+            la_at_pos = ea_l_pos
+            a_nodes, a_batch, a_resnum = anchor_ctx
+            la_at_neg = model._extract_local(a_nodes, a_batch, a_resnum, mut_pos_neg_selected)
             zn_l_selected = en_l[flat_idx]
 
             B = la_at_pos.size(0)
@@ -124,7 +125,8 @@ def train_pipeline(config=None, force=False, split_path=None,
     run = wandb.init(
         project="ContVAR-Project",
         config=vars(cfg),
-        reinit=True
+        reinit=True,
+        settings=wandb.Settings(_disable_stats=True)
     )
 
     # Update config from wandb if sweep is running
@@ -144,6 +146,7 @@ def train_pipeline(config=None, force=False, split_path=None,
     print(f"Training with LR: {cfg.lr}, Hidden: {cfg.hidden_dim}, Heads: {cfg.heads}")
     print(f"Curriculum Learning: {cfg.curriculum_warmup_epochs} warm-up epochs with exhaustive sampling")
     print(f"Streaming Mining: chunk_size={cfg.mining_chunk_size}, max_negatives={cfg.max_negatives}")
+    print(f"Gradient Accumulation: {cfg.grad_accumulation_steps} steps (effective batch = {cfg.mining_batch_size * cfg.grad_accumulation_steps})")
     print(f"Local Loss: Contrastive (attract good / repel bad at mutation position)")
     if cfg.phase1_early_stop:
         print(f"Phase 1 Early Stopping: ON (threshold={cfg.phase1_es_threshold}, "
@@ -224,8 +227,6 @@ def train_pipeline(config=None, force=False, split_path=None,
         edge_dim=cfg.edge_attr_dim
     ).to(device)
 
-    wandb.watch(model, log="gradients", log_freq=50)
-
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     standard_criterion = StandardTripletLoss(margin=cfg.margin)
@@ -296,10 +297,9 @@ def train_pipeline(config=None, force=False, split_path=None,
             es_loss_buffer = deque(maxlen=cfg.phase1_es_window)
             es_patience_counter = 0
 
-        mining_batch_table = wandb.Table(columns=[
-            "batch_idx", "hard_count", "semi_hard_count", "total_evaluated", "total_qualifying"
-        ])
+        accum_steps = cfg.grad_accumulation_steps if not is_warmup_phase else 1
 
+        optimizer.zero_grad()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False, total=num_train_batches)
 
         for batch in pbar:
@@ -322,9 +322,8 @@ def train_pipeline(config=None, force=False, split_path=None,
             mut_pos_positive = mut_pos_positive.to(device)
             mut_pos_negatives = mut_pos_negatives.to(device)
 
-            optimizer.zero_grad()
-
-            ea_g, _ = model(ba)
+            # Forward anchor ONCE, reuse node features for local extraction
+            ea_g, ea_l_pos, anchor_ctx = model.forward_with_nodes(ba, mut_pos=mut_pos_positive)
             ep_g, ep_l = model(bp, mut_pos=mut_pos_positive)
             en_g, en_l = model(bn, mut_pos=mut_pos_negatives)
 
@@ -337,8 +336,9 @@ def train_pipeline(config=None, force=False, split_path=None,
             # =================================================================
             # LOCAL CONTRASTIVE LOSS
             # =================================================================
-            _, la_at_pos = model(ba, mut_pos=mut_pos_positive)
-            _, la_at_neg = model(ba, mut_pos=mut_pos_neg_selected)
+            la_at_pos = ea_l_pos  # already extracted above
+            a_nodes, a_batch, a_resnum = anchor_ctx
+            la_at_neg = model._extract_local(a_nodes, a_batch, a_resnum, mut_pos_neg_selected)
             zn_l_selected = en_l[flat_idx]
 
             B = la_at_pos.size(0)
@@ -378,10 +378,13 @@ def train_pipeline(config=None, force=False, split_path=None,
             # COMBINED LOSS
             # =================================================================
             loss = (loss_g + loss_l) / 2
-            loss.backward()
+            scaled_loss = loss / accum_steps
+            scaled_loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            if valid_batches % accum_steps == (accum_steps - 1):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
 
             with torch.no_grad():
                 k_vals = [1, 5] if current_batch_size >= 5 else [1]
@@ -393,16 +396,10 @@ def train_pipeline(config=None, force=False, split_path=None,
                 "train/batch_loss": loss.item(),
                 "train/batch_loss_g": loss_g.item(),
                 "train/batch_loss_l": loss_l.item(),
-                "train/Alignment": batch_metrics["Alignment"],
                 "train/Uniformity": batch_metrics["Uniformity"],
                 "train/avg_pos_dist": dist_pos.mean().item(),
                 "train/avg_neg_dist": neg_dist.mean().item(),
                 "train/dist_margin": (neg_dist.mean() - dist_pos.mean()).item(),
-                "train/AUROC": batch_metrics["AUROC"],
-                "train/Simple_Acc": batch_metrics["Simple_Acc"],
-                "train/MRR": batch_metrics["MRR"],
-                "train/R@1": batch_metrics["R@1"],
-                "train/total_negatives": len(en_g),
                 "train/phase": 1 if is_warmup_phase else 2,
                 "train/batch_size": current_batch_size,
                 "train/avg_pos_dist_l": d_pos_l.mean().item(),
@@ -413,15 +410,12 @@ def train_pipeline(config=None, force=False, split_path=None,
                 "local/batch_hard": batch_local_hard,
             }
 
-            if "R@5" in batch_metrics:
-                log_payload["train/R@5"] = batch_metrics["R@5"]
-
             if streaming_info is not None:
-                log_payload["streaming/batch_hard_count"] = streaming_info["streaming_hard"]
-                log_payload["streaming/batch_semi_hard_count"] = streaming_info["streaming_semi_hard"]
-                log_payload["streaming/batch_total_evaluated"] = streaming_info["total_evaluated"]
-                log_payload["streaming/batch_total_qualifying"] = streaming_info["total_qualifying"]
-                log_payload["streaming/batch_qualifying_ratio"] = (
+                log_payload["mining/batch_hard_count"] = streaming_info["streaming_hard"]
+                log_payload["mining/batch_semi_hard_count"] = streaming_info["streaming_semi_hard"]
+                log_payload["mining/batch_total_evaluated"] = streaming_info["total_evaluated"]
+                log_payload["mining/batch_total_qualifying"] = streaming_info["total_qualifying"]
+                log_payload["mining/batch_qualifying_ratio"] = (
                     streaming_info["total_qualifying"] / streaming_info["total_evaluated"]
                     if streaming_info["total_evaluated"] > 0 else 0
                 )
@@ -451,15 +445,6 @@ def train_pipeline(config=None, force=False, split_path=None,
                 epoch_streaming_semi_hard_total += streaming_info["streaming_semi_hard"]
                 epoch_streaming_evaluated_total += streaming_info["total_evaluated"]
                 epoch_streaming_qualifying_total += streaming_info["total_qualifying"]
-
-            if streaming_info is not None:
-                mining_batch_table.add_data(
-                    valid_batches,
-                    streaming_info["streaming_hard"],
-                    streaming_info["streaming_semi_hard"],
-                    streaming_info["total_evaluated"],
-                    streaming_info["total_qualifying"],
-                )
 
             total_loss += loss.item()
             total_loss_g += loss_g.item()
@@ -493,6 +478,12 @@ def train_pipeline(config=None, force=False, split_path=None,
                               f"for {cfg.phase1_es_patience} consecutive windows)")
                         pbar.close()
                         break
+
+        # Flush remaining accumulated gradients at end of epoch
+        if valid_batches % accum_steps != 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
         avg_train_loss = total_loss / valid_batches if valid_batches > 0 else 0
         avg_train_loss_g = total_loss_g / valid_batches if valid_batches > 0 else 0
@@ -531,80 +522,27 @@ def train_pipeline(config=None, force=False, split_path=None,
             "val/Uniformity": val_metrics.get("Uniformity", 0),
             "train/epoch_duration_sec": epoch_duration_sec,
             "train/epoch_overfit_gap": val_metrics.get("loss", 0) - avg_train_loss,
-            "train/epoch_loss_ratio_g": avg_train_loss_g / avg_train_loss if avg_train_loss > 0 else 0,
-            "train/epoch_loss_ratio_l": avg_train_loss_l / avg_train_loss if avg_train_loss > 0 else 0,
             "train/epoch_num_batches": valid_batches,
         }
 
         for k, v in embedding_stats.items():
             log_dict[f"embedding_stats/{k}"] = v
 
-        log_dict["streaming/epoch_hard_total"] = epoch_streaming_hard_total
-        log_dict["streaming/epoch_semi_hard_total"] = epoch_streaming_semi_hard_total
-        log_dict["streaming/epoch_total_evaluated"] = epoch_streaming_evaluated_total
-        log_dict["streaming/epoch_total_qualifying"] = epoch_streaming_qualifying_total
-        log_dict["streaming/epoch_qualifying_ratio"] = (
+        log_dict["mining/epoch_hard_total"] = epoch_streaming_hard_total
+        log_dict["mining/epoch_semi_hard_total"] = epoch_streaming_semi_hard_total
+        log_dict["mining/epoch_total_evaluated"] = epoch_streaming_evaluated_total
+        log_dict["mining/epoch_total_qualifying"] = epoch_streaming_qualifying_total
+        log_dict["mining/epoch_qualifying_ratio"] = (
             epoch_streaming_qualifying_total / epoch_streaming_evaluated_total
             if epoch_streaming_evaluated_total > 0 else 0
         )
-        log_dict["streaming/epoch_easy_total"] = (
+        log_dict["mining/epoch_easy_total"] = (
             epoch_streaming_evaluated_total - epoch_streaming_qualifying_total
         )
 
         log_dict["local/epoch_easy_total"] = epoch_local_easy_total
         log_dict["local/epoch_semi_hard_total"] = epoch_local_semi_hard_total
         log_dict["local/epoch_hard_total"] = epoch_local_hard_total
-
-        # Determine which epochs get persistent bar plots
-        middle_epoch = cfg.epochs // 2
-        snapshot_epochs = {1, middle_epoch, cfg.epochs - 1}
-
-        if epoch in snapshot_epochs:
-            tag = {1: "first", middle_epoch: "middle", cfg.epochs - 1: "last"}[epoch]
-
-            epoch_easy = epoch_streaming_evaluated_total - epoch_streaming_qualifying_total
-            mining_table = wandb.Table(
-                data=[
-                    ("Hard", epoch_streaming_hard_total),
-                    ("Semi-hard", epoch_streaming_semi_hard_total),
-                    ("Easy (discarded)", epoch_easy),
-                ],
-                columns=["Type", "Count"]
-            )
-            mining_bar = wandb.plot.bar(
-                mining_table, label="Type", value="Count",
-                title=f"ALL-neg mining counts — {tag} (Epoch {epoch+1})"
-            )
-            log_dict[f"mining_counts/{tag}_mining_bar"] = mining_bar
-
-            local_mining_table = wandb.Table(
-                data=[
-                    ("Hard", epoch_local_hard_total),
-                    ("Semi-hard", epoch_local_semi_hard_total),
-                    ("Easy", epoch_local_easy_total),
-                ],
-                columns=["Type", "Count"]
-            )
-            local_mining_bar = wandb.plot.bar(
-                local_mining_table, label="Type", value="Count",
-                title=f"LOCAL contrastive mining — {tag} (Epoch {epoch+1})"
-            )
-            log_dict[f"local_mining/{tag}_local_bar"] = local_mining_bar
-
-            hard_bar_per_batch = wandb.plot.bar(
-                mining_batch_table,
-                label="batch_idx",
-                value="hard_count",
-                title=f"ALL-neg hard per batch — {tag} (Epoch {epoch+1})",
-            )
-            semi_hard_bar_per_batch = wandb.plot.bar(
-                mining_batch_table,
-                label="batch_idx",
-                value="semi_hard_count",
-                title=f"ALL-neg semi-hard per batch — {tag} (Epoch {epoch+1})",
-            )
-            log_dict[f"mining_counts/{tag}_hard_per_batch_bar"] = hard_bar_per_batch
-            log_dict[f"mining_counts/{tag}_semi_hard_per_batch_bar"] = semi_hard_bar_per_batch
 
         # Save best model
         if val_metrics.get("loss", float('inf')) < best_val_loss:
@@ -632,6 +570,10 @@ def train_pipeline(config=None, force=False, split_path=None,
               f"Val AUROC: {val_metrics.get('AUROC', 0):.4f} | "
               f"Local[E:{epoch_local_easy_total} S:{epoch_local_semi_hard_total} H:{epoch_local_hard_total}] "
               f"{saved_str}{es_str}")
+
+    # Save last epoch model
+    torch.save(model.state_dict(), "model_last.pt")
+    print("Saved last epoch model to model_last.pt")
 
     wandb.finish()
     print("\nTraining completed!")

@@ -192,7 +192,7 @@ def plot_tsne(coords_2d, meta, title):
 
 
 def visualize_tsne(model=None,
-                   model_path="model_best_loss.pt",
+                   model_path="model_last.pt",
                    splits=None,
                    max_families=20,
                    max_variants_per_role=5,
@@ -221,7 +221,6 @@ def visualize_tsne(model=None,
             hidden_dim=cfg.hidden_dim,
             output_dim=cfg.output_dim,
             heads=cfg.heads,
-            dropout=cfg.dropout,
             edge_dim=cfg.edge_attr_dim,
         ).to(device)
         model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))

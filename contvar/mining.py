@@ -105,10 +105,12 @@ def mine_negatives_streaming(model, anchor_embeds, pos_dists, batch_triplets,
 
             del chunk_batch, chunk_embed, chunk_dists
 
-        # Select top-K hardest qualifying negatives
+        # Select random from qualifying negatives (not hardeest)
         if family_qualifying:
-            family_qualifying.sort(key=lambda x: x[1])
-            selected = family_qualifying[:max_negatives]
+            if len(family_qualifying) <= max_negatives:
+                selected = family_qualifying
+            else:
+                selected = random.sample(family_qualifying, max_negatives)
         else:
             if closest_neg is not None:
                 selected = [closest_neg]
@@ -133,6 +135,7 @@ def mine_negatives_streaming(model, anchor_embeds, pos_dists, batch_triplets,
 def streaming_mining_batch_iterator(model, triplets, processed_dir, device, cfg):
     """
     Generator that yields pre-mined batches for Phase 2 training.
+    Our purpose is to avoid GPU memory issues by streaming negatives in chunks during mining, rather than trying to mine all negatives for the entire dataset at once.
 
     Yields:
         (batch_a, batch_p, batch_n, neg_counts, mut_pos_positive, mut_pos_negatives, streaming_info)

@@ -35,22 +35,24 @@ class DeepProteinGAT(nn.Module):
                                dropout=0.0, edge_dim=hidden_dim)
         self.norm1 = nn.LayerNorm(conv_out_dim)
 
-        # Residual projection (match input_dim → conv_out_dim)
+        # Residual projection (match input_dim -> conv_out_dim)
         self.input_proj = nn.Linear(input_dim, conv_out_dim)
 
-        # Projection heads (no BatchNorm, no Dropout — L2 normalize at output handles scale)
+        # Global projection head
         self.projection = nn.Sequential(
             nn.Linear(conv_out_dim, projection_hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(projection_hidden_dim, output_dim),
         )
+        # Local projection head
         self.projection_local = nn.Sequential(
             nn.Linear(conv_out_dim, projection_hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(projection_hidden_dim, output_dim),
         )
 
-    def forward(self, data, mut_pos=None):
+    def _gnn_forward(self, data):
+        """Run GNN backbone, return node features and metadata for reuse."""
         x, edge_index, batch = data.x, data.edge_index, data.batch
         edge_attr = data.edge_attr if hasattr(data, 'edge_attr') and data.edge_attr is not None else None
 
@@ -71,29 +73,59 @@ class DeepProteinGAT(nn.Module):
         x = x + x_residual
         x = F.elu(x)
 
+        res_num = data.residue_number.to(x.device) if hasattr(data, 'residue_number') and data.residue_number is not None else None
+        return x, batch, res_num
+
+    def _extract_local(self, x, batch, res_num, mut_pos):
+        """Extract local embeddings at given positions from pre-computed node features.
+        This is used during mining to efficiently get local embeddings without re-running the GNN."""
+        B = batch.max().item() + 1
+        device = x.device
+        mut_pos = mut_pos.to(device)
+        x_local = torch.zeros(B, x.size(1), device=device, dtype=x.dtype)
+        for i in range(B):
+            mask = (batch == i) & (res_num == mut_pos[i])
+            if mask.any() and mut_pos[i] >= 0:
+                idx = mask.nonzero(as_tuple=True)[0][0]
+                x_local[i] = x[idx]
+            else:
+                graph_mask = (batch == i)
+                x_local[i] = x[graph_mask].mean(0)
+        x_local = self.projection_local(x_local)
+        x_local = F.normalize(x_local, p=2, dim=1)
+        return x_local
+
+    def forward(self, data, mut_pos=None):
+        x, batch, res_num = self._gnn_forward(data)
+
         # Global embedding
         x_global = global_mean_pool(x, batch)
         x_global = self.projection(x_global)
         x_global = F.normalize(x_global, p=2, dim=1)
 
         # Local: embedding at mut_pos per graph (fallback to graph mean if position missing)
-        if mut_pos is not None and hasattr(data, 'residue_number') and data.residue_number is not None:
-            B = batch.max().item() + 1
-            device = x.device
-            res_num = data.residue_number.to(device)
-            mut_pos = mut_pos.to(device)
-            x_local = torch.zeros(B, x.size(1), device=device, dtype=x.dtype)
-            for i in range(B):
-                mask = (batch == i) & (res_num == mut_pos[i])
-                if mask.any() and mut_pos[i] >= 0:
-                    idx = mask.nonzero(as_tuple=True)[0][0]
-                    x_local[i] = x[idx]
-                else:
-                    graph_mask = (batch == i)
-                    x_local[i] = x[graph_mask].mean(0)
-            x_local = self.projection_local(x_local)
-            x_local = F.normalize(x_local, p=2, dim=1)
+        if mut_pos is not None and res_num is not None:
+            x_local = self._extract_local(x, batch, res_num, mut_pos)
         else:
             x_local = x_global
 
         return x_global, x_local
+
+    def forward_with_nodes(self, data, mut_pos=None):
+        """Forward pass that also returns node-level features for reuse.
+
+        Returns (x_global, x_local, node_ctx) where node_ctx = (x, batch, res_num)
+        can be passed to _extract_local for cheap additional position extractions.
+        """
+        x, batch, res_num = self._gnn_forward(data)
+
+        x_global = global_mean_pool(x, batch)
+        x_global = self.projection(x_global)
+        x_global = F.normalize(x_global, p=2, dim=1)
+
+        if mut_pos is not None and res_num is not None:
+            x_local = self._extract_local(x, batch, res_num, mut_pos)
+        else:
+            x_local = x_global
+
+        return x_global, x_local, (x, batch, res_num)
