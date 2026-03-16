@@ -56,6 +56,21 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
 
     print("\n=== Phase 0: GO Semantic Similarity Pretraining ===")
 
+    # If GO structures are provided as a ZIP archive, extract them lazily.
+    # This is especially useful on Colab, where the zip lives on Drive.
+    if getattr(cfg, "go_structures_zip", None):
+        if not os.path.exists(cfg.go_structure_root):
+            os.makedirs(cfg.go_structure_root, exist_ok=True)
+            zip_path = cfg.go_structures_zip
+            if os.path.exists(zip_path):
+                import zipfile
+                print(f"[Phase0] Extracting GO structures from ZIP: {zip_path}")
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    zf.extractall(cfg.go_structure_root)
+                print(f"[Phase0] Extracted GO structures to: {cfg.go_structure_root}")
+            else:
+                print(f"[Phase0] WARNING: go_structures_zip={zip_path} does not exist; continuing without unzip.")
+
     # Resolve TSV paths
     tsv_dir = cfg.go_tsv_dir
     mf_tsv = os.path.join(

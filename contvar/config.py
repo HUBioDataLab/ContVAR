@@ -98,9 +98,13 @@ class ProjectConfig:
             os.path.dirname(os.path.dirname(__file__)), "semantic_similarity"
         )
         # Root directory holding structures for GO proteins
+        # (If go_structures_zip is set, this will be the unzip target.)
         self.go_structure_root = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "go_structures"
         )
+        # Optional: path to a ZIP file containing GO structures (e.g. on Colab/Drive).
+        # If provided and go_structure_root does not exist yet, it will be extracted there.
+        self.go_structures_zip = None
         # Optional separate embeddings file for GO proteins
         self.go_embeddings_path = None
         self.go_use_esm_embeddings = False
