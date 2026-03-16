@@ -1,9 +1,7 @@
 import os
 
 import numpy as np
-import pandas as pd
 import torch
-import torch.nn.functional as F
 from torch_geometric.data import Batch
 from torch_geometric.nn import global_mean_pool
 from tqdm import tqdm
@@ -19,9 +17,7 @@ from contvar.model import DeepProteinGAT
 
 
 def _extract_baseline_pooled(data, device, mut_pos_val=None):
-    """
-    Extract baseline embeddings from raw node features (no GNN).
-    """
+    """Extract baseline embeddings from raw node features (no GNN)."""
     batch_data = Batch.from_data_list([data]).to(device)
     x = batch_data.x.float()
     batch_vec = batch_data.batch
@@ -44,13 +40,36 @@ def _extract_baseline_pooled(data, device, mut_pos_val=None):
     return g.cpu().numpy(), l.cpu().numpy()
 
 
+def _extract_variant(model, path, processed_dir, device, pid, role,
+                     global_embs, local_embs, meta,
+                     bl_global, bl_local, mut_pos_val=None):
+    """Load one variant, run model + baseline, append to lists."""
+    data = load_processed_graph_static(path, processed_dir)
+    if data is None:
+        return
+
+    mut_tensor = None
+    if mut_pos_val is not None:
+        mut_tensor = torch.tensor(
+            [mut_pos_val if mut_pos_val is not None else -1], dtype=torch.long
+        ).to(device)
+
+    batch = Batch.from_data_list([data]).to(device)
+    eg, el = model(batch) if mut_tensor is None else model(batch, mut_pos=mut_tensor)
+
+    global_embs.append(eg.cpu().numpy())
+    local_embs.append(el.cpu().numpy())
+    meta.append({"protein": pid, "role": role})
+
+    bg, bl = _extract_baseline_pooled(data, device, mut_pos_val)
+    bl_global.append(bg)
+    bl_local.append(bl)
+
+
 def extract_embeddings_for_tsne(model, mapper, split, processed_dir,
                                  device, max_families=20,
-                                 max_variants_per_role=5,
-                                 include_baseline=True):
-    """
-    Extract global and local embeddings for t-SNE visualization.
-    """
+                                 max_variants_per_role=5):
+    """Extract global/local + baseline embeddings for t-SNE."""
     triplets = mapper.get_split(split)
     selected = triplets[:max_families]
 
@@ -62,64 +81,31 @@ def extract_embeddings_for_tsne(model, mapper, split, processed_dir,
         for t in tqdm(selected, desc=f"Extracting embeddings ({split})"):
             pid = t["protein_id"]
 
-            # --- Anchor ---
-            a_data = load_processed_graph_static(t["anchor"], processed_dir)
-            if a_data is None:
-                continue
-            batch_a = Batch.from_data_list([a_data]).to(device)
-            ea_g, ea_l = model(batch_a)
-            global_embs.append(ea_g.cpu().numpy())
-            local_embs.append(ea_l.cpu().numpy())
-            meta.append({"protein": pid, "role": "anchor"})
-            if include_baseline:
-                bg, bl = _extract_baseline_pooled(a_data, device)
-                bl_global.append(bg); bl_local.append(bl)
+            _extract_variant(model, t["anchor"], processed_dir, device,
+                             pid, "anchor", global_embs, local_embs, meta,
+                             bl_global, bl_local)
 
-            # --- Positives ---
             for pos_path in t["positives"][:max_variants_per_role]:
-                p_data = load_processed_graph_static(pos_path, processed_dir)
-                if p_data is None:
-                    continue
-                mut_pos_p = parse_mut_pos_from_path(pos_path)
-                mut_tensor = torch.tensor(
-                    [mut_pos_p if mut_pos_p is not None else -1], dtype=torch.long
-                ).to(device)
-                batch_p = Batch.from_data_list([p_data]).to(device)
-                ep_g, ep_l = model(batch_p, mut_pos=mut_tensor)
-                global_embs.append(ep_g.cpu().numpy())
-                local_embs.append(ep_l.cpu().numpy())
-                meta.append({"protein": pid, "role": "positive"})
-                if include_baseline:
-                    bg, bl = _extract_baseline_pooled(p_data, device, mut_pos_p)
-                    bl_global.append(bg); bl_local.append(bl)
+                mut_pos = parse_mut_pos_from_path(pos_path)
+                _extract_variant(model, pos_path, processed_dir, device,
+                                 pid, "positive", global_embs, local_embs, meta,
+                                 bl_global, bl_local, mut_pos)
 
-            # --- Negatives ---
             for neg_path in t["negatives"][:max_variants_per_role]:
-                n_data = load_processed_graph_static(neg_path, processed_dir)
-                if n_data is None:
-                    continue
-                mut_pos_n = parse_mut_pos_from_path(neg_path)
-                mut_tensor = torch.tensor(
-                    [mut_pos_n if mut_pos_n is not None else -1], dtype=torch.long
-                ).to(device)
-                batch_n = Batch.from_data_list([n_data]).to(device)
-                en_g, en_l = model(batch_n, mut_pos=mut_tensor)
-                global_embs.append(en_g.cpu().numpy())
-                local_embs.append(en_l.cpu().numpy())
-                meta.append({"protein": pid, "role": "negative"})
-                if include_baseline:
-                    bg, bl = _extract_baseline_pooled(n_data, device, mut_pos_n)
-                    bl_global.append(bg); bl_local.append(bl)
+                mut_pos = parse_mut_pos_from_path(neg_path)
+                _extract_variant(model, neg_path, processed_dir, device,
+                                 pid, "negative", global_embs, local_embs, meta,
+                                 bl_global, bl_local, mut_pos)
 
-    global_embs = np.vstack(global_embs)
-    local_embs = np.vstack(local_embs)
-    if include_baseline:
-        return (global_embs, local_embs, meta,
-                np.vstack(bl_global), np.vstack(bl_local))
-    return global_embs, local_embs, meta, None, None
+    return (np.vstack(global_embs), np.vstack(local_embs), meta,
+            np.vstack(bl_global), np.vstack(bl_local))
 
 
-_ROLE_SIZE = {"negative": 30, "positive": 30, "anchor": 120}
+# =============================================
+# Plotting
+# =============================================
+
+_ROLE_SIZE = {"negative": 12, "positive": 12, "anchor": 120}
 
 
 def _build_protein_color_map(meta):
@@ -127,13 +113,11 @@ def _build_protein_color_map(meta):
     proteins = list(dict.fromkeys(m["protein"] for m in meta))
     n = max(len(proteins), 1)
 
-    # Generate distinct tones across green and red hue ranges
     green_cmap = plt.cm.Greens
     red_cmap = plt.cm.Reds
-    # Sample from 0.35..0.9 to avoid too-light and too-dark extremes
     positions = np.linspace(0.35, 0.9, n)
 
-    color_map = {}  # (protein, role) -> color
+    color_map = {}
     for i, pid in enumerate(proteins):
         color_map[(pid, "positive")] = green_cmap(positions[i])
         color_map[(pid, "negative")] = red_cmap(positions[i])
@@ -146,29 +130,26 @@ def _plot_panel(ax, coords_2d, meta, title):
     """Draw a single t-SNE scatter panel on *ax* with per-protein coloring."""
     proteins, color_map = _build_protein_color_map(meta)
 
-    # Draw negatives first, then positives, then anchors (z-order)
     for role, zorder in [("negative", 1), ("positive", 2), ("anchor", 3)]:
         marker = "*" if role == "anchor" else "o"
+        edge = "black" if role == "anchor" else "none"
         for pid in proteins:
             idxs = [i for i, m in enumerate(meta)
                     if m["role"] == role and m["protein"] == pid]
             if not idxs:
                 continue
             ax.scatter(
-                coords_2d[idxs, 0],
-                coords_2d[idxs, 1],
-                c=[color_map[(pid, role)]],
-                marker=marker,
-                s=_ROLE_SIZE[role],
-                alpha=0.7,
-                edgecolors="none",
-                zorder=zorder,
+                coords_2d[idxs, 0], coords_2d[idxs, 1],
+                c=[color_map[(pid, role)]], marker=marker,
+                s=_ROLE_SIZE[role], alpha=0.5,
+                edgecolors=edge, linewidth=0.5, zorder=zorder,
             )
 
-    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_title(title, fontsize=14, fontweight="bold")
     ax.set_xlabel("t-SNE 1")
     ax.set_ylabel("t-SNE 2")
-    ax.grid(True, linewidth=0.3, alpha=0.5)
+    ax.grid(True, alpha=0.2)
+    ax.set_axisbelow(True)
 
 
 def _make_legend_handles(meta):
@@ -182,66 +163,57 @@ def _make_legend_handles(meta):
             handles.append(
                 mlines.Line2D([], [], color=color_map[(pid, "positive")],
                               marker="o", linestyle="None", markersize=8,
-                              label=f"{pid} (good)"))
+                              label=f"{pid} (positive)"))
         if "negative" in roles_present:
             handles.append(
                 mlines.Line2D([], [], color=color_map[(pid, "negative")],
                               marker="o", linestyle="None", markersize=8,
-                              label=f"{pid} (bad)"))
+                              label=f"{pid} (negative)"))
 
     if "anchor" in roles_present:
         handles.append(
             mlines.Line2D([], [], color="gold", marker="*",
+                          markeredgecolor="black", markeredgewidth=0.5,
                           linestyle="None", markersize=12, label="WT"))
 
     return handles
 
 
-def plot_tsne_side_by_side(bl_2d, proj_2d, meta, suptitle,
-                           left_title="Baseline (Raw ESM)",
-                           right_title="Projected"):
-    """Side-by-side baseline vs projected t-SNE (matplotlib)."""
-    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(16, 7))
-    fig.suptitle(suptitle, fontsize=14, fontweight="bold", y=1.02)
+def _plot_side_by_side(bl_2d, proj_2d, meta, suptitle, filename):
+    """1x2 figure: baseline (left) vs projected (right), legend outside."""
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(20, 9))
+    fig.suptitle(suptitle, fontsize=16, fontweight="bold")
 
-    _plot_panel(ax_l, bl_2d, meta, left_title)
-    _plot_panel(ax_r, proj_2d, meta, right_title)
+    _plot_panel(ax_l, bl_2d, meta, "Baseline (Raw ESM)")
+    _plot_panel(ax_r, proj_2d, meta, "Projected")
 
     handles = _make_legend_handles(meta)
-    ax_r.legend(handles=handles, loc="upper right", fontsize=7,
-                framealpha=0.8, ncol=2)
+    fig.legend(handles=handles, loc="center left", bbox_to_anchor=(1.0, 0.5),
+               fontsize=9, framealpha=0.8, ncol=1)
 
-    fig.tight_layout()
-    plt.show()
+    plt.tight_layout(rect=[0, 0, 0.95, 0.95])
+    plt.savefig(filename, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"[t-SNE] Saved → {filename}")
+    return filename
 
 
-def plot_tsne(coords_2d, meta, title):
-    """Single-panel t-SNE plot (matplotlib)."""
-    fig, ax = plt.subplots(figsize=(9, 7))
-    _plot_panel(ax, coords_2d, meta, title)
-    handles = _make_legend_handles(meta)
-    ax.legend(handles=handles, loc="upper right", fontsize=7,
-              framealpha=0.8, ncol=2)
-    fig.tight_layout()
-    plt.show()
-
+# =============================================
+# Main entry point
+# =============================================
 
 def visualize_tsne(model=None,
-                   model_path="model_last.pt",
+                   model_path="model_best_loss.pt",
                    splits=None,
                    max_families=20,
                    max_variants_per_role=5,
                    perplexity=30,
                    random_state=42,
-                   show_baseline=True,
                    data_root=None,
                    device=None):
-    """
-    Run t-SNE on global and local embeddings and display interactive plots.
-    """
+    """Run t-SNE on global and local embeddings, save 2x2 comparison plot."""
     if splits is None:
         splits = ["val"]
-
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if data_root is None:
@@ -252,10 +224,8 @@ def visualize_tsne(model=None,
 
     if model is None:
         model = DeepProteinGAT(
-            input_dim=cfg.input_dim,
-            hidden_dim=cfg.hidden_dim,
-            output_dim=cfg.output_dim,
-            heads=cfg.heads,
+            input_dim=cfg.input_dim, hidden_dim=cfg.hidden_dim,
+            output_dim=cfg.output_dim, heads=cfg.heads,
             edge_dim=cfg.edge_attr_dim,
         ).to(device)
         model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
@@ -278,7 +248,6 @@ def visualize_tsne(model=None,
                 model, mapper, split, processed_dir, device,
                 max_families=max_families,
                 max_variants_per_role=max_variants_per_role,
-                include_baseline=show_baseline,
             )
 
         n_points = len(meta)
@@ -287,46 +256,34 @@ def visualize_tsne(model=None,
 
         tsne_kwargs = dict(
             n_components=2, perplexity=effective_perplexity,
-            random_state=random_state, n_iter=1000,
+            random_state=random_state, max_iter=1000,
+            init="pca", learning_rate="auto",
         )
 
         print("Computing t-SNE projections...")
         global_2d = TSNE(**tsne_kwargs).fit_transform(global_embs)
+        bl_global_2d = TSNE(**tsne_kwargs).fit_transform(bl_global)
 
-        # For local plots, exclude anchors (they have no mutation position,
-        # so their "local" embedding is just the global one — misleading).
+        # Exclude anchors from local plots (no mutation position)
         local_idxs = [i for i, m in enumerate(meta) if m["role"] != "anchor"]
         local_meta = [meta[i] for i in local_idxs]
-        local_embs_filtered = local_embs[local_idxs]
 
-        if show_baseline and bl_global is not None:
-            bl_global_2d = TSNE(**tsne_kwargs).fit_transform(bl_global)
-            bl_local_filtered = bl_local[local_idxs]
+        local_perp = min(perplexity, len(local_meta) - 1)
+        local_tsne_kwargs = dict(
+            n_components=2, perplexity=local_perp,
+            random_state=random_state, max_iter=1000,
+            init="pca", learning_rate="auto",
+        )
+        local_2d = TSNE(**local_tsne_kwargs).fit_transform(local_embs[local_idxs])
+        bl_local_2d = TSNE(**local_tsne_kwargs).fit_transform(bl_local[local_idxs])
 
-            # Recompute t-SNE for local with filtered points
-            local_perp = min(perplexity, len(local_meta) - 1)
-            local_tsne_kwargs = dict(
-                n_components=2, perplexity=local_perp,
-                random_state=random_state, n_iter=1000,
-            )
-            local_2d = TSNE(**local_tsne_kwargs).fit_transform(local_embs_filtered)
-            bl_local_2d = TSNE(**local_tsne_kwargs).fit_transform(bl_local_filtered)
-
-            plot_tsne_side_by_side(
-                bl_global_2d, global_2d, meta,
-                suptitle=f"t-SNE Embedding Visualization — Global ({split})",
-                left_title="Baseline Global (Raw ESM)",
-                right_title="Projected Global",
-            )
-            plot_tsne_side_by_side(
-                bl_local_2d, local_2d, local_meta,
-                suptitle=f"t-SNE Embedding Visualization — Local ({split})",
-                left_title="Baseline Local (Raw ESM)",
-                right_title="Projected Local",
-            )
-        else:
-            local_2d = TSNE(**tsne_kwargs).fit_transform(local_embs_filtered)
-            plot_tsne(global_2d, meta,
-                      f"Projected Global t-SNE ({split})")
-            plot_tsne(local_2d, local_meta,
-                      f"Projected Local t-SNE ({split})")
+        _plot_side_by_side(
+            bl_global_2d, global_2d, meta,
+            suptitle=f"t-SNE Global Embedding — {split}",
+            filename=f"tsne_global_{split}.png",
+        )
+        _plot_side_by_side(
+            bl_local_2d, local_2d, local_meta,
+            suptitle=f"t-SNE Local Embedding — {split}",
+            filename=f"tsne_local_{split}.png",
+        )
