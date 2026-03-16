@@ -164,10 +164,27 @@ class GOSemanticTripletDataset(Dataset):
     # Graph utilities
     # ------------------------------------------------------------------
     def _id_to_path(self, protein_id: str) -> Optional[str]:
+        """
+        Resolve a protein ID to a structure file path.
+
+        We first look directly under structure_root, then fall back to a
+        recursive search (to support layouts like .../alphafold_structures/cif/*.cif).
+        """
+        if not self.structure_root:
+            return None
+
         for ext in self.file_exts:
-            candidate = os.path.join(self.structure_root, f"{protein_id}{ext}")
-            if os.path.exists(candidate):
-                return candidate
+            # Direct path: <root>/<id>.<ext>
+            direct = os.path.join(self.structure_root, f"{protein_id}{ext}")
+            if os.path.exists(direct):
+                return direct
+
+            # Recursive search: walk all subfolders and look for matching filename
+            target_name = f"{protein_id}{ext}"
+            for root, _, files in os.walk(self.structure_root):
+                if target_name in files:
+                    return os.path.join(root, target_name)
+
         return None
 
     def _build_graph(self, protein_id: str) -> Optional[Data]:
