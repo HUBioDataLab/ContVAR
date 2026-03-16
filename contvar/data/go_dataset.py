@@ -86,6 +86,16 @@ class GOSemanticTripletDataset(Dataset):
         self.graph_cache: Dict[str, Data] = {}
 
         self._parse_tsv()
+        # Optional subsampling to keep phase-0 manageable on limited hardware
+        max_triplets = getattr(self.config, "go_max_triplets_per_ontology", None)
+        if max_triplets is not None and len(self.triplets) > max_triplets:
+            from random import sample
+            original_len = len(self.triplets)
+            self.triplets = sample(self.triplets, max_triplets)
+            print(
+                f"[GO-{self.ontology}] Subsampled triplets: {original_len:,} -> "
+                f"{len(self.triplets):,} (max={max_triplets})"
+            )
 
     # ------------------------------------------------------------------
     # TSV parsing and triplet construction

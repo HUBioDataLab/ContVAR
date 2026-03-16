@@ -39,7 +39,7 @@ def _build_go_loader(
         dataset,
         batch_size=cfg.go_batch_size,
         shuffle=True,
-        num_workers=getattr(cfg, "num_workers", 0),
+        num_workers=getattr(cfg, "go_num_workers", 0),
     )
     return loader
 
