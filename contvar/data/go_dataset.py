@@ -177,23 +177,18 @@ class GOSemanticTripletDataset(Dataset):
         """
         Resolve a protein ID to a structure file path.
 
-        We first look directly under structure_root, then fall back to a
-        recursive search (to support layouts like .../alphafold_structures/cif/*.cif).
+        We look recursively under structure_root for files whose name starts
+        with the ID and ends with .cif, e.g. O57562_wt_model.cif.
         """
         if not self.structure_root:
             return None
 
-        for ext in self.file_exts:
-            # Direct path: <root>/<id>.<ext>
-            direct = os.path.join(self.structure_root, f"{protein_id}{ext}")
-            if os.path.exists(direct):
-                return direct
-
-            # Recursive search: walk all subfolders and look for matching filename
-            target_name = f"{protein_id}{ext}"
-            for root, _, files in os.walk(self.structure_root):
-                if target_name in files:
-                    return os.path.join(root, target_name)
+        target_prefix = f"{protein_id}_"
+        for root, _, files in os.walk(self.structure_root):
+            for fname in files:
+                # We only care about CIF files whose basename starts with the ID
+                if fname.endswith(".cif") and fname.startswith(target_prefix):
+                    return os.path.join(root, fname)
 
         return None
 
@@ -308,17 +303,29 @@ class GOSemanticTripletDataset(Dataset):
         return len(self.triplets)
 
     def __getitem__(self, idx: int):
-        anchor_id, pos_id, neg_id = self.triplets[idx]
+        """
+        Robust __getitem__ with limited resampling.
 
-        g_a = self._get_graph(anchor_id)
-        g_p = self._get_graph(pos_id)
-        g_n = self._get_graph(neg_id)
+        Many semantic-similarity IDs may not have corresponding CIF/PDB
+        structures. Instead of recursing indefinitely when graphs are
+        missing, we try a fixed number of random resamples, then raise.
+        """
+        max_attempts = 20
+        for _ in range(max_attempts):
+            anchor_id, pos_id, neg_id = self.triplets[idx]
 
-        if g_a is None or g_p is None or g_n is None:
-            # In case of missing graphs, resample another index
-            new_idx = random.randint(0, len(self.triplets) - 1)
-            return self.__getitem__(new_idx)
+            g_a = self._get_graph(anchor_id)
+            g_p = self._get_graph(pos_id)
+            g_n = self._get_graph(neg_id)
 
-        # Attach batch indices lazily via DataLoader's default collate
-        return g_a, g_p, g_n
+            if g_a is not None and g_p is not None and g_n is not None:
+                return g_a, g_p, g_n
+
+            # Pick a new random index and try again
+            idx = random.randint(0, len(self.triplets) - 1)
+
+        raise RuntimeError(
+            f"[GO-{self.ontology}] Failed to load graphs after {max_attempts} attempts. "
+            f"Check that CIF/PDB files exist for the IDs in {self.tsv_path} under {self.structure_root}."
+        )
 
