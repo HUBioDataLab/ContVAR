@@ -59,9 +59,16 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
     # If GO structures are provided as a ZIP archive, extract them lazily.
     # This is especially useful on Colab, where the zip lives on Drive.
     if getattr(cfg, "go_structures_zip", None):
+        zip_path = cfg.go_structures_zip
+
+        # Derive a default root folder from the zip name if not provided.
+        if not getattr(cfg, "go_structure_root", None):
+            base = os.path.splitext(os.path.basename(zip_path))[0]
+            # On Colab we typically work under /content; user can still override.
+            cfg.go_structure_root = os.path.join("/content/content", base)
+
         if not os.path.exists(cfg.go_structure_root):
             os.makedirs(cfg.go_structure_root, exist_ok=True)
-            zip_path = cfg.go_structures_zip
             if os.path.exists(zip_path):
                 import zipfile
                 print(f"[Phase0] Extracting GO structures from ZIP: {zip_path}")

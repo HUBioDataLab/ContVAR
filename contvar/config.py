@@ -97,11 +97,10 @@ class ProjectConfig:
         self.go_tsv_dir = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "semantic_similarity"
         )
-        # Root directory holding structures for GO proteins
-        # (If go_structures_zip is set, this will be the unzip target.)
-        self.go_structure_root = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "go_structures"
-        )
+        # Root directory holding structures for GO proteins.
+        # If left as None and go_structures_zip is set, a default
+        # folder will be derived from the zip name (useful on Colab).
+        self.go_structure_root = None
         # Optional: path to a ZIP file containing GO structures (e.g. on Colab/Drive).
         # If provided and go_structure_root does not exist yet, it will be extracted there.
         self.go_structures_zip = None
