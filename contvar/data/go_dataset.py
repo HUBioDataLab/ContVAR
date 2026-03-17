@@ -183,11 +183,20 @@ class GOSemanticTripletDataset(Dataset):
         if not self.structure_root:
             return None
 
-        target_prefix = f"{protein_id}_"
+        # Many Alphafold/UniProt downloads use lowercase IDs in filenames,
+        # while TSVs may contain uppercase IDs. Normalise to lowercase for
+        # matching so that, e.g., "A0A009IHW8" matches "a0a009ihw8_wt_model.cif".
+        pid_lower = protein_id.lower()
+        target_prefix = f"{pid_lower}_"
+
         for root, _, files in os.walk(self.structure_root):
             for fname in files:
-                # We only care about CIF files whose basename starts with the ID
-                if fname.endswith(".cif") and fname.startswith(target_prefix):
+                if not fname.lower().endswith(".cif"):
+                    continue
+
+                fname_lower = fname.lower()
+                # Basic pattern: "<id>_*.cif" (e.g. a0a009ihw8_wt_model.cif)
+                if fname_lower.startswith(target_prefix):
                     return os.path.join(root, fname)
 
         return None
