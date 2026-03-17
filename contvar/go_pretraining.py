@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
+from torch_geometric.data import Batch
 
 from contvar.config import ProjectConfig
 from contvar.data.go_dataset import GOSemanticTripletDataset
@@ -16,6 +17,26 @@ def _triplet_loss(anchor, positive, negative, margin: float):
     d_pos = F.pairwise_distance(anchor, positive, p=2)
     d_neg = F.pairwise_distance(anchor, negative, p=2)
     return F.relu(d_pos - d_neg + margin).mean(), d_pos, d_neg
+
+
+def _go_collate(batch):
+    """
+    Collate function for GO phase-0 triplets.
+
+    Each item coming from the dataset is a simple (anchor, positive, negative)
+    tuple of torch_geometric.data.Data objects. We need to convert each column
+    into a separate Batch so the model can process them.
+    """
+    # Filter out any None entries (in case dataset decides to skip samples)
+    batch = [item for item in batch if item is not None]
+    if not batch:
+        return None
+
+    anchors, positives, negatives = zip(*batch)
+    ba = Batch.from_data_list(list(anchors))
+    bp = Batch.from_data_list(list(positives))
+    bn = Batch.from_data_list(list(negatives))
+    return ba, bp, bn
 
 
 def _build_go_loader(
@@ -39,6 +60,7 @@ def _build_go_loader(
         dataset,
         batch_size=cfg.go_batch_size,
         shuffle=True,
+        collate_fn=_go_collate,
         num_workers=getattr(cfg, "go_num_workers", 0),
     )
     return loader
