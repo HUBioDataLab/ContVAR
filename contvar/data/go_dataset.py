@@ -48,6 +48,10 @@ class GOSemanticTripletDataset(Dataset):
         self.ontology = ontology
         self.config = config
         self.structure_root = structure_root
+        # Optional per-protein ESM2 embeddings, keyed by protein ID.
+        # When provided, we will append these to the node feature vectors so
+        # that the resulting feature dimension matches the main model's
+        # expected input_dim (e.g. 20 AA one-hot + 1280-dim embedding).
         self.esm2_embeddings = esm2_embeddings or {}
         self.file_exts = file_exts
 
@@ -248,6 +252,18 @@ class GOSemanticTripletDataset(Dataset):
                         fv.extend(list(v))
                     else:
                         fv.append(v)
+
+                # If ESM2 embeddings were provided, append them so that
+                # node feature dimensionality matches ProjectConfig.input_dim.
+                if self.esm2_embeddings:
+                    emb = self.esm2_embeddings.get(protein_id)
+                    if emb is None:
+                        # If embeddings are expected but missing for this ID,
+                        # treat the graph as unusable so the dataset can
+                        # resample another triplet.
+                        return None
+                    fv.extend(list(emb))
+
                 node_features.append(fv)
                 coords_list.append(d["coords"])
 
