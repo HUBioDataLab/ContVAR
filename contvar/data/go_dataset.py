@@ -256,7 +256,8 @@ class GOSemanticTripletDataset(Dataset):
                 # If ESM2 embeddings were provided, append them so that
                 # node feature dimensionality matches ProjectConfig.input_dim.
                 if self.esm2_embeddings:
-                    emb = self.esm2_embeddings.get(protein_id)
+                    # Keys in load_all_embeddings are lowercased to match h5 IDs / TSV casing
+                    emb = self.esm2_embeddings.get(protein_id.lower())
                     if emb is None:
                         # If embeddings are expected but missing for this ID,
                         # treat the graph as unusable so the dataset can

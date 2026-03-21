@@ -107,7 +107,8 @@ class ProjectConfig:
         # Optional: path to a ZIP file containing GO structures (e.g. on Colab/Drive).
         # If provided and go_structure_root does not exist yet, it will be extracted there.
         self.go_structures_zip = None
-        # Optional separate embeddings file for GO proteins
+        # Optional separate embeddings file for GO Phase 0 (SwissProt-scale h5).
+        # Colab example: /content/drive/MyDrive/ContVAR/esm2_t33_650M_UR50D_protein_embedding.h5
         self.go_embeddings_path = None
         self.go_use_esm_embeddings = False
 

@@ -115,6 +115,7 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
     # Optional embeddings for node features
     esm_embeddings = None
     if getattr(cfg, "go_use_esm_embeddings", True) and cfg.go_embeddings_path:
+        print(f"[Phase0] Loading GO ESM2 embeddings from: {cfg.go_embeddings_path}")
         esm_embeddings = load_all_embeddings(cfg.go_embeddings_path)
 
     # Build loaders
