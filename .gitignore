@@ -1,4 +1,20 @@
-.vscode/
 protein_triplets_data/
-model_best_loss.pt
+protein_triplets_data/negatives/
+protein_triplets_data/positives/
 wandb/
+model_best_loss.pt
+.vscode/
+sadece_graph_ouşturma.py
+tests.ipynb
+zip_back_to_drive.py
+.claude/settings.local.json
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+_cell_*.py
+contvar_v0.ipynb
+sequence_model/
+requirements.txt
+validation (1).py
