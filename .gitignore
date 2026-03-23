@@ -23,3 +23,4 @@ semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv
 semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv
 semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv
 semantic_similarity/semantic_similarity_swissprot_full.tsv
+PHASE0_GO_PRETRAINING.md
