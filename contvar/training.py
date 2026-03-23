@@ -577,4 +577,4 @@ def train_pipeline(config=None, force=False, split_path=None,
 
     wandb.finish()
     print("\nTraining completed!")
-    return model
+    return model, mapper, processed_dir

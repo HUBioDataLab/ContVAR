@@ -62,7 +62,7 @@ class ProjectConfig:
         self.lr = 1e-4
         self.weight_decay = 0.01
         self.batch_size = 8
-        self.epochs = 300
+        self.epochs = 100
         self.margin = 0.3
 
         # Loss Function Configuration
