@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -12,11 +12,64 @@ from contvar.config import ProjectConfig
 from contvar.data.go_dataset import GOSemanticTripletDataset
 from contvar.utils import load_all_embeddings
 
+# Ontology order matches meeting pseudocode (MF → BP → CC).
+_GO_ONTOLOGY_ORDER: Tuple[str, ...] = ("mf", "bp", "cc")
+
 
 def _triplet_loss(anchor, positive, negative, margin: float):
     d_pos = F.pairwise_distance(anchor, positive, p=2)
     d_neg = F.pairwise_distance(anchor, negative, p=2)
     return F.relu(d_pos - d_neg + margin).mean(), d_pos, d_neg
+
+
+def _infinite_batches(loader: DataLoader):
+    """Yield batches forever; each pass over the loader gets a fresh shuffle."""
+    while True:
+        for batch in loader:
+            yield batch
+
+
+def _compute_go_phase0_loss(
+    model,
+    batch_dict: Dict[str, Tuple[Batch, Batch, Batch]],
+    device: torch.device,
+    margin: float,
+    ontologies: List[str],
+):
+    """
+    Pseudocode-style GO loss: average triplet losses over ontologies present
+    in this step (each uses its own head via forward_go_head).
+    """
+    losses = []
+    per_ont = {}
+
+    for ont in ontologies:
+        triplet = batch_dict.get(ont)
+        if triplet is None:
+            continue
+        ba, bpos, bneg = triplet
+        ba = ba.to(device)
+        bpos = bpos.to(device)
+        bneg = bneg.to(device)
+
+        za = model.forward_go_head(ba, ont)
+        zp = model.forward_go_head(bpos, ont)
+        zn = model.forward_go_head(bneg, ont)
+
+        loss_ont, d_pos, d_neg = _triplet_loss(za, zp, zn, margin=margin)
+        losses.append(loss_ont)
+        per_ont[ont] = {
+            "loss": loss_ont.item(),
+            "avg_pos_dist": d_pos.mean().item(),
+            "avg_neg_dist": d_neg.mean().item(),
+            "dist_margin": (d_neg.mean() - d_pos.mean()).item(),
+        }
+
+    if not losses:
+        return None, per_ont
+
+    total = sum(losses) / len(losses)
+    return total, per_ont
 
 
 def _go_collate(batch):
@@ -136,6 +189,9 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         print("No GO loaders constructed for phase 0, skipping.")
         return
 
+    # Stable order for averaging (only ontologies that have a loader).
+    active_ontologies = [o for o in _GO_ONTOLOGY_ORDER if o in loaders]
+
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.go_lr, weight_decay=cfg.weight_decay
     )
@@ -147,41 +203,53 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         epoch_loss = 0.0
         epoch_steps = 0
 
-        for ontology, loader in loaders.items():
-            for batch in tqdm(
-                loader, desc=f"Phase0 Epoch {epoch+1} [{ontology.upper()}]", leave=False
-            ):
-                ba, bp, bn = batch
-                ba = ba.to(device)
-                bp = bp.to(device)
-                bn = bn.to(device)
+        # One training step = one batch per ontology (cycled), loss = mean
+        # over available ontologies (pseudocode-style).
+        gens: Dict[str, Iterator] = {
+            ont: _infinite_batches(loaders[ont]) for ont in active_ontologies
+        }
+        n_steps = max(len(loaders[ont]) for ont in active_ontologies)
 
-                za = model.forward_go_head(ba, ontology)
-                zp = model.forward_go_head(bp, ontology)
-                zn = model.forward_go_head(bn, ontology)
+        pbar = tqdm(
+            range(n_steps),
+            desc=f"Phase0 Epoch {epoch+1}",
+            leave=False,
+        )
+        for _ in pbar:
+            batch_dict = {}
+            for ont in active_ontologies:
+                b = next(gens[ont])
+                if b is not None:
+                    batch_dict[ont] = b
 
-                loss, d_pos, d_neg = _triplet_loss(
-                    za, zp, zn, margin=cfg.go_margin
-                )
+            loss, per_ont = _compute_go_phase0_loss(
+                model,
+                batch_dict,
+                device,
+                cfg.go_margin,
+                active_ontologies,
+            )
+            if loss is None:
+                continue
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-                epoch_loss += loss.item()
-                epoch_steps += 1
+            epoch_loss += loss.item()
+            epoch_steps += 1
 
-                log_dict = {
-                    f"phase0/{ontology}/batch_loss": loss.item(),
-                    f"phase0/{ontology}/avg_pos_dist": d_pos.mean().item(),
-                    f"phase0/{ontology}/avg_neg_dist": d_neg.mean().item(),
-                    f"phase0/{ontology}/dist_margin": (
-                        d_neg.mean() - d_pos.mean()
-                    ).item(),
-                    "phase0/ontology": ontology,
-                    "phase0/epoch": epoch + 1,
-                }
-                wandb.log(log_dict)
+            log_dict = {
+                "phase0/combined_batch_loss": loss.item(),
+                "phase0/n_ontologies_in_batch": len(per_ont),
+                "phase0/epoch": epoch + 1,
+            }
+            for ont, st in per_ont.items():
+                log_dict[f"phase0/{ont}/batch_loss"] = st["loss"]
+                log_dict[f"phase0/{ont}/avg_pos_dist"] = st["avg_pos_dist"]
+                log_dict[f"phase0/{ont}/avg_neg_dist"] = st["avg_neg_dist"]
+                log_dict[f"phase0/{ont}/dist_margin"] = st["dist_margin"]
+            wandb.log(log_dict)
 
         if epoch_steps > 0:
             avg_loss = epoch_loss / epoch_steps
