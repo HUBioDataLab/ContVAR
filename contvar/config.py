@@ -89,7 +89,7 @@ class ProjectConfig:
         # Phase 0: GO semantic similarity pretraining
         self.go_phase0_epochs = 2  # set >0 to enable (override in Colab if needed)
         self.go_margin = 0.2
-        self.go_batch_size = 32
+        self.go_batch_size = 8
         self.go_lr = 1e-4
         # Limit and loader settings for GO pretraining
         self.go_max_triplets_per_ontology = 1000  # subsample for Colab; can be overridden
