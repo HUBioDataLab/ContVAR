@@ -56,6 +56,24 @@ class DeepProteinGAT(nn.Module):
             nn.Linear(projection_hidden_dim, output_dim),
         )
 
+        # Optional GO heads for phase-0 semantic pretraining
+        # They operate on the global embedding space and are shared across phases.
+        self.head_mf = nn.Sequential(
+            nn.Linear(output_dim, output_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(output_dim, output_dim),
+        )
+        self.head_bp = nn.Sequential(
+            nn.Linear(output_dim, output_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(output_dim, output_dim),
+        )
+        self.head_cc = nn.Sequential(
+            nn.Linear(output_dim, output_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(output_dim, output_dim),
+        )
+
     def _gnn_forward(self, data):
         """Run GNN backbone, return node features and metadata for reuse."""
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -73,6 +91,7 @@ class DeepProteinGAT(nn.Module):
         x_residual = self.input_proj(x)
 
         # GATv2 layer 1 with residual connection
+        # Single GATv2 layer with residual connection
         x = self.conv1(x, edge_index, edge_attr=edge_embed)
         x = self.norm1(x)
         x = x + x_residual
@@ -141,3 +160,28 @@ class DeepProteinGAT(nn.Module):
             x_local = x_global
 
         return x_global, x_local, (x, batch, res_num)
+
+    # ------------------------------------------------------------------
+    # GO semantic pretraining helpers (phase 0)
+    # ------------------------------------------------------------------
+    def forward_go_head(self, data, ontology: str):
+        """
+        Compute ontology-specific embedding for GO semantic pretraining.
+
+        Args:
+            data: PyG Data batch
+            ontology: one of {'mf', 'bp', 'cc'}
+        """
+        z_g, _ = self.forward(data, mut_pos=None)
+
+        if ontology == "mf":
+            z = self.head_mf(z_g)
+        elif ontology == "bp":
+            z = self.head_bp(z_g)
+        elif ontology == "cc":
+            z = self.head_cc(z_g)
+        else:
+            raise ValueError(f"Unknown ontology: {ontology}")
+
+        z = F.normalize(z, p=2, dim=1)
+        return z

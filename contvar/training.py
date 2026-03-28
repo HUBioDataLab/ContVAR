@@ -19,6 +19,7 @@ from contvar.losses import StandardTripletLoss, SemiHardMiningTripletLoss
 from contvar.mining import streaming_mining_batch_iterator
 from contvar.metrics import compute_detailed_metrics, compute_embedding_stats
 from contvar.utils import load_all_embeddings
+from contvar.go_pretraining import run_go_pretraining
 
 
 def evaluate(model, loader, criterion, device, margin=0.3):
@@ -155,6 +156,10 @@ def train_pipeline(config=None, force=False, split_path=None,
     else:
         print(f"Phase 1 Early Stopping: OFF")
 
+    # Optional Phase 0: GO semantic similarity pretraining
+    # (uses separate semantic_similarity TSVs and GO heads on the encoder)
+    # This runs before the curriculum learning phases.
+
     # Load data with per-family hold-out split
     mapper = TripletDataPathMapper(data_root, val_pos=2, val_neg=2, seed=42, split_path=split_path)
     if not mapper.triplets:
@@ -233,6 +238,10 @@ def train_pipeline(config=None, force=False, split_path=None,
     semihard_criterion = SemiHardMiningTripletLoss(margin=cfg.margin)
 
     val_criterion = standard_criterion
+
+    # Phase 0 GO pretraining (if enabled)
+    if getattr(cfg, "go_phase0_epochs", 0) > 0:
+        run_go_pretraining(model, cfg, device)
 
     print("\n" + "="*60)
     print("STARTING CURRICULUM LEARNING")
@@ -578,3 +587,4 @@ def train_pipeline(config=None, force=False, split_path=None,
     wandb.finish()
     print("\nTraining completed!")
     return model, mapper, processed_dir
+

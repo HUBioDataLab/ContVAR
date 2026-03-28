@@ -86,6 +86,32 @@ class ProjectConfig:
         self.phase1_es_patience = 3
         self.phase1_es_min_batches = 50
 
+        # Phase 0: GO semantic similarity pretraining
+        self.go_phase0_epochs = 2  # set >0 to enable (override in Colab if needed)
+        self.go_margin = 0.2
+        self.go_batch_size = 32
+        self.go_lr = 1e-4
+        # Limit and loader settings for GO pretraining
+        self.go_max_triplets_per_ontology = 1000  # subsample for Colab; can be overridden
+        self.go_num_workers = 0  # DataLoader workers for GO (0 is safer on Colab)
+
+        # Paths for GO pretraining
+        # Directory containing semantic similarity TSVs
+        self.go_tsv_dir = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "semantic_similarity"
+        )
+        # Root directory holding structures for GO proteins.
+        # If left as None and go_structures_zip is set, a default
+        # folder will be derived from the zip name (useful on Colab).
+        self.go_structure_root = None
+        # Optional: path to a ZIP file containing GO structures (e.g. on Colab/Drive).
+        # If provided and go_structure_root does not exist yet, it will be extracted there.
+        self.go_structures_zip = None
+        # Optional separate embeddings file for GO Phase 0 (SwissProt-scale h5).
+        # Colab example: /content/drive/MyDrive/ContVAR/esm2_t33_650M_UR50D_protein_embedding.h5
+        self.go_embeddings_path = None
+        self.go_use_esm_embeddings = False
+
     @property
     def input_dim(self):
         """Calculate input dimension based on active features"""
