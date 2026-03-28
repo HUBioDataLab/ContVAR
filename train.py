@@ -30,7 +30,7 @@ def main():
     if args.wandb_key:
         wandb.login(key=args.wandb_key)
 
-    model = train_pipeline(
+    model, mapper, processed_dir = train_pipeline(
         force=args.force,
         split_path=args.split_path,
         data_root=env['data_root'],
