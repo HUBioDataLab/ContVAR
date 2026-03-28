@@ -56,13 +56,13 @@ class ProjectConfig:
         self.dist_threshold = 8.0
 
         # Model Hyperparameters
-        self.hidden_dim = 64
+        self.hidden_dim = 128
         self.output_dim = 256
         self.heads = 4
         self.lr = 1e-4
         self.weight_decay = 0.01
         self.batch_size = 8
-        self.epochs = 100
+        self.epochs = 200
         self.margin = 0.3
 
         # Loss Function Configuration

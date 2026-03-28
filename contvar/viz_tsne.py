@@ -257,7 +257,7 @@ def visualize_tsne(model, mapper, processed_dir, device,
         ax.set_axisbelow(True)
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    path1 = os.path.join(save_dir, f"tsne_comparison_top_{n_proteins}.png")
+    path1 = os.path.join(save_dir, f"tsne_comparison_{split}_top_{n_proteins}.png")
     plt.savefig(path1, dpi=200, bbox_inches='tight')
     plt.close()
 
@@ -300,7 +300,7 @@ def visualize_tsne(model, mapper, processed_dir, device,
         ax.grid(True, alpha=0.2)
 
     plt.tight_layout()
-    path2 = os.path.join(save_dir, f"tsne_per_protein_top_{n_proteins}.png")
+    path2 = os.path.join(save_dir, f"tsne_per_protein_{split}_top_{n_proteins}.png")
     plt.savefig(path2, dpi=200, bbox_inches='tight')
     plt.close()
 

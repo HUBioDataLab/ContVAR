@@ -5,7 +5,7 @@ from torch_geometric.nn import GATv2Conv, global_mean_pool
 
 
 class DeepProteinGAT(nn.Module):
-    """Single-layer GATv2 model with residual connection, edge features,
+    """Two-layer GATv2 model with residual connections, edge features,
     and clean projection heads for metric learning.
 
     This model supports both edge construction modes:
@@ -30,10 +30,15 @@ class DeepProteinGAT(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Single GATv2 layer
+        # GATv2 layer 1: input_dim -> hidden_dim * heads
         self.conv1 = GATv2Conv(input_dim, hidden_dim, heads=heads, concat=True,
                                dropout=0.0, edge_dim=hidden_dim)
         self.norm1 = nn.LayerNorm(conv_out_dim)
+
+        # GATv2 layer 2: conv_out_dim -> hidden_dim * heads
+        self.conv2 = GATv2Conv(conv_out_dim, hidden_dim, heads=heads, concat=True,
+                               dropout=0.0, edge_dim=hidden_dim)
+        self.norm2 = nn.LayerNorm(conv_out_dim)
 
         # Residual projection (match input_dim -> conv_out_dim)
         self.input_proj = nn.Linear(input_dim, conv_out_dim)
@@ -67,10 +72,17 @@ class DeepProteinGAT(nn.Module):
         # Residual: project original ESM2 features to match conv output dim
         x_residual = self.input_proj(x)
 
-        # Single GATv2 layer with residual connection
+        # GATv2 layer 1 with residual connection
         x = self.conv1(x, edge_index, edge_attr=edge_embed)
         x = self.norm1(x)
         x = x + x_residual
+        x = F.elu(x)
+
+        # GATv2 layer 2 with residual connection
+        x_residual2 = x
+        x = self.conv2(x, edge_index, edge_attr=edge_embed)
+        x = self.norm2(x)
+        x = x + x_residual2
         x = F.elu(x)
 
         res_num = data.residue_number.to(x.device) if hasattr(data, 'residue_number') and data.residue_number is not None else None
