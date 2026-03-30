@@ -112,6 +112,20 @@ class ProjectConfig:
         self.go_embeddings_path = None
         self.go_use_esm_embeddings = False
 
+        # Phase-0: identity-aware train/val/test split (sequence groups, e.g. UniRef50)
+        # "none" = use all triplets (legacy). "identity_grouped" = filter by cluster split.
+        self.go_split_mode = "none"
+        self.go_split_seed = 42
+        self.go_train_ratio = 0.8
+        self.go_val_ratio = 0.1
+        self.go_test_ratio = 0.1
+        # Tab-separated mapping: protein_id -> group_id (e.g. UniRef50 cluster).
+        self.go_cluster_map_path = None
+        # JSON with group_id -> "train"|"val"|"test"; share this file across teams.
+        self.go_split_json_path = None
+        # If set and go_split_json_path is missing, write a new split here after assignment.
+        self.go_save_split_json_path = None
+
     @property
     def input_dim(self):
         """Calculate input dimension based on active features"""

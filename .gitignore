@@ -28,6 +28,11 @@ semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv
 semantic_similarity/semantic_similarity_swissprot_full.tsv
 PHASE0_GO_PRETRAINING.md
 
+# Phase-0 helper scripts (keep local, do not commit)
+scripts/build_phase0_go_split.py
+scripts/fetch_uniref50_cluster_map.py
+scripts/generate_phase0_split_bundle.py
+
 # Local notes / briefs (not tracked)
 GO_DMS_TOPLANTI_NOTU_2026-03-12.md
 PHASE0_TASK_BRIEF.md

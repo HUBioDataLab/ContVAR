@@ -1,7 +1,7 @@
 import os
 import random
 import tempfile
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Literal
 
 import numpy as np
 import torch
@@ -42,6 +42,8 @@ class GOSemanticTripletDataset(Dataset):
         neg_low: float = 0.0,
         neg_mid: float = 0.1,
         neg_high: float = 0.2,
+        phase0_split: Optional[Literal["train", "val", "test"]] = None,
+        protein_to_split: Optional[Dict[str, str]] = None,
     ):
         super().__init__()
         self.tsv_path = tsv_path
@@ -63,6 +65,8 @@ class GOSemanticTripletDataset(Dataset):
         self.neg_low = neg_low
         self.neg_mid = neg_mid
         self.neg_high = neg_high
+        self.phase0_split = phase0_split
+        self.protein_to_split = protein_to_split
 
         # Graph-building helpers (SALAD-style by default)
         self.node_metadata_funcs = self.config.get_active_node_metadata_funcs()
@@ -90,12 +94,28 @@ class GOSemanticTripletDataset(Dataset):
         self.graph_cache: Dict[str, Data] = {}
 
         self._parse_tsv()
+
+        if self.phase0_split and self.protein_to_split:
+            from contvar.go_identity_split import filter_triplets_by_split
+
+            before = len(self.triplets)
+            self.triplets = filter_triplets_by_split(
+                self.triplets, self.protein_to_split, self.phase0_split
+            )
+            print(
+                f"[GO-{self.ontology}] Split={self.phase0_split}: "
+                f"{before:,} -> {len(self.triplets):,} triplets (identity filter)"
+            )
+
         # Optional subsampling to keep phase-0 manageable on limited hardware
         max_triplets = getattr(self.config, "go_max_triplets_per_ontology", None)
         if max_triplets is not None and len(self.triplets) > max_triplets:
-            from random import sample
             original_len = len(self.triplets)
-            self.triplets = sample(self.triplets, max_triplets)
+            seed = int(getattr(self.config, "go_split_seed", 42))
+            if self.phase0_split:
+                seed += {"train": 0, "val": 1, "test": 2}[self.phase0_split]
+            rng = random.Random(seed)
+            self.triplets = rng.sample(self.triplets, max_triplets)
             print(
                 f"[GO-{self.ontology}] Subsampled triplets: {original_len:,} -> "
                 f"{len(self.triplets):,} (max={max_triplets})"

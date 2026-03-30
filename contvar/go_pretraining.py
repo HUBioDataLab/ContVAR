@@ -10,6 +10,7 @@ from torch_geometric.data import Batch
 
 from contvar.config import ProjectConfig
 from contvar.data.go_dataset import GOSemanticTripletDataset
+from contvar.go_identity_split import resolve_phase0_split
 from contvar.utils import load_all_embeddings
 
 # Ontology order matches meeting pseudocode (MF → BP → CC).
@@ -92,12 +93,44 @@ def _go_collate(batch):
     return ba, bp, bn
 
 
+def _mean_eval_loss_for_loaders(
+    model,
+    loaders: Dict[str, DataLoader],
+    device: torch.device,
+    margin: float,
+    ontologies: List[str],
+) -> Optional[float]:
+    """Average per-batch loss across all batches and ontologies (eval mode)."""
+    model.eval()
+    batch_losses: List[float] = []
+    with torch.no_grad():
+        for ont in ontologies:
+            loader = loaders.get(ont)
+            if loader is None:
+                continue
+            for batch in loader:
+                if batch is None:
+                    continue
+                batch_dict = {ont: batch}
+                loss, _ = _compute_go_phase0_loss(
+                    model, batch_dict, device, margin, [ont]
+                )
+                if loss is not None:
+                    batch_losses.append(loss.item())
+    if not batch_losses:
+        return None
+    return sum(batch_losses) / len(batch_losses)
+
+
 def _build_go_loader(
     tsv_path: str,
     ontology: str,
     cfg: ProjectConfig,
     structure_root: str,
     esm2_embeddings: Optional[dict],
+    shuffle: bool,
+    phase0_split: Optional[str] = None,
+    protein_to_split: Optional[dict] = None,
 ) -> Optional[DataLoader]:
     dataset = GOSemanticTripletDataset(
         tsv_path=tsv_path,
@@ -105,6 +138,8 @@ def _build_go_loader(
         config=cfg,
         structure_root=structure_root,
         esm2_embeddings=esm2_embeddings,
+        phase0_split=phase0_split,
+        protein_to_split=protein_to_split,
     )
     if len(dataset) == 0:
         return None
@@ -112,7 +147,7 @@ def _build_go_loader(
     loader = DataLoader(
         dataset,
         batch_size=cfg.go_batch_size,
-        shuffle=True,
+        shuffle=shuffle,
         collate_fn=_go_collate,
         num_workers=getattr(cfg, "go_num_workers", 0),
     )
@@ -165,25 +200,69 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         tsv_dir, "semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv"
     )
 
+    protein_to_split: Optional[dict] = None
+    if getattr(cfg, "go_split_mode", "none") == "identity_grouped":
+        protein_to_split, _ = resolve_phase0_split(cfg, mf_tsv, bp_tsv, cc_tsv)
+
     # Optional embeddings for node features
     esm_embeddings = None
     if getattr(cfg, "go_use_esm_embeddings", True) and cfg.go_embeddings_path:
         print(f"[Phase0] Loading GO ESM2 embeddings from: {cfg.go_embeddings_path}")
         esm_embeddings = load_all_embeddings(cfg.go_embeddings_path)
 
-    # Build loaders
-    loaders = {}
-    for ont, path in [("mf", mf_tsv), ("bp", bp_tsv), ("cc", cc_tsv)]:
-        if os.path.exists(path):
+    def make_loaders_for_split(split_name: Optional[str], shuffle: bool):
+        out: Dict[str, DataLoader] = {}
+        for ont, path in [("mf", mf_tsv), ("bp", bp_tsv), ("cc", cc_tsv)]:
+            if not os.path.exists(path):
+                continue
+            ps = split_name if protein_to_split else None
+            pt = protein_to_split if protein_to_split else None
             loader = _build_go_loader(
                 tsv_path=path,
                 ontology=ont,
                 cfg=cfg,
                 structure_root=cfg.go_structure_root,
                 esm2_embeddings=esm_embeddings,
+                shuffle=shuffle,
+                phase0_split=ps,
+                protein_to_split=pt,
             )
             if loader is not None:
-                loaders[ont] = loader
+                out[ont] = loader
+        return out
+
+    if protein_to_split:
+        train_loaders = make_loaders_for_split("train", shuffle=True)
+        val_loaders = make_loaders_for_split("val", shuffle=False)
+        test_loaders = make_loaders_for_split("test", shuffle=False)
+        loaders = train_loaders
+        for split_label, ld in (
+            ("train", train_loaders),
+            ("val", val_loaders),
+            ("test", test_loaders),
+        ):
+            for ont in _GO_ONTOLOGY_ORDER:
+                if ont not in ld:
+                    continue
+                n = len(ld[ont].dataset)
+                print(f"[Phase0] {split_label} triplets [{ont}]: {n:,}")
+                wandb.log({f"phase0/split/{split_label}_triplets_{ont}": n})
+    else:
+        loaders = {}
+        for ont, path in [("mf", mf_tsv), ("bp", bp_tsv), ("cc", cc_tsv)]:
+            if os.path.exists(path):
+                loader = _build_go_loader(
+                    tsv_path=path,
+                    ontology=ont,
+                    cfg=cfg,
+                    structure_root=cfg.go_structure_root,
+                    esm2_embeddings=esm_embeddings,
+                    shuffle=True,
+                )
+                if loader is not None:
+                    loaders[ont] = loader
+        val_loaders = {}
+        test_loaders = {}
 
     if not loaders:
         print("No GO loaders constructed for phase 0, skipping.")
@@ -262,3 +341,22 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
             f"Avg Loss: {avg_loss:.4f}"
         )
 
+        if protein_to_split and val_loaders:
+            v_loss = _mean_eval_loss_for_loaders(
+                model, val_loaders, device, cfg.go_margin, active_ontologies
+            )
+            if v_loss is not None:
+                wandb.log(
+                    {"phase0/val/mean_loss": v_loss, "phase0/epoch": epoch + 1}
+                )
+                print(f"[Phase0] Val mean loss: {v_loss:.4f}")
+
+        if protein_to_split and test_loaders:
+            t_loss = _mean_eval_loss_for_loaders(
+                model, test_loaders, device, cfg.go_margin, active_ontologies
+            )
+            if t_loss is not None:
+                wandb.log(
+                    {"phase0/test/mean_loss": t_loss, "phase0/epoch": epoch + 1}
+                )
+                print(f"[Phase0] Test mean loss: {t_loss:.4f}")

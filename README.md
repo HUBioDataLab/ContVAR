@@ -100,6 +100,49 @@ Temel ayarlar `contvar/config.py` icindeki `ProjectConfig` ile yonetilir. Ornek 
 - ESM embedding kullanimi (`esm_dim`),
 - GO Phase-0 dosya ve epoch ayarlari.
 
+## Phase-0 GO: kimlik bilincine sahip train/val/test
+
+GO TSV’lerindeki `sim_mf` / `sim_bp` / `sim_cc` **semantic** (anlamsal) benzerliktir; sekans kimligi (> %50) icin TSV’deki skorlar kullanilmaz. Train/val/test ayrimi **grup bazinda** yapilir (ornegin UniProt protein ID → UniRef50 cluster mapping’i ile): ayni gruptaki proteinler ayni bolmede kalir; `80 / 10 / 10` orani **grup sayisina** gore uygulanir.
+
+- Harici mapping: `protein_id` ve `group_id` (veya `uniref`, `cluster_id`) kolonlu tab-ayirali dosya; `go_cluster_map_path`.
+- Paylasilabilir split ciktisi: `go_split_json_path` (icinde `group_id -> train|val|test`). Diger ekip ayni JSON + ayni mapping ile es split’i alir. Bu dosyalari repoya commit etmeyin; Drive/zip/e-posta ile paylasin (`.gitignore` ornekleri: `local_splits/`, `*_phase0_go_split.json`).
+- Offline uretim: `python scripts/build_phase0_go_split.py --cluster-map ... --mf-tsv ... --bp-tsv ... --cc-tsv ... --output phase0_go_split.json` (Torch gerektirmez; `contvar.go_identity_split` kullanir).
+
+### Phase-0 split JSON’u tek seferde uretmek (onerilen)
+
+Proje kokunden (internet gerekir; buyuk TSV’lerde UniProt sorgulari uzun surebilir):
+
+```bash
+python scripts/generate_phase0_split_bundle.py
+```
+
+Bu komut sirasiyla:
+
+1. GO TSV’lerde gecen tum UniProt ID’leri icin UniProt REST API ile `UniRef50` cluster ID’lerini indirir ve `local_splits/protein_uniref50.tsv` yazar.
+2. `local_splits/phase0_go_split.json` dosyasini (grup -> train/val/test, 80/10/10) uretir.
+
+Zaten elinizde `protein_id` / `group_id` TSV’si varsa sadece JSON uretin:
+
+```bash
+python scripts/generate_phase0_split_bundle.py --skip-fetch --cluster-map /path/to/mapping.tsv --output-json /path/to/phase0_go_split.json
+```
+
+Sadece mapping indirmek icin:
+
+```bash
+python scripts/fetch_uniref50_cluster_map.py --output local_splits/protein_uniref50.tsv --mf-tsv semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv --bp-tsv semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv --cc-tsv semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv
+```
+
+Egitimde ornek:
+
+```python
+"go_split_mode": "identity_grouped",
+"go_cluster_map_path": r"C:\path\to\ContVAR\local_splits\protein_uniref50.tsv",
+"go_split_json_path": r"C:\path\to\ContVAR\local_splits\phase0_go_split.json",
+```
+
+Config anahtarlari: `go_split_mode` (`none` | `identity_grouped`), `go_split_seed`, `go_train_ratio`, `go_val_ratio`, `go_test_ratio`, `go_cluster_map_path`, `go_split_json_path`, `go_save_split_json_path`.
+
 ## Notlar
 
 - `run.ipynb` dosyasi Colab icin hazirlanmistir; yerel kullanimda `train.py` daha net bir baslangic noktasi sunar.
