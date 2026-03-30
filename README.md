@@ -143,6 +143,18 @@ Egitimde ornek:
 
 Config anahtarlari: `go_split_mode` (`none` | `identity_grouped`), `go_split_seed`, `go_train_ratio`, `go_val_ratio`, `go_test_ratio`, `go_cluster_map_path`, `go_split_json_path`, `go_save_split_json_path`.
 
+## Phase-0 GO: ontology sampling orani (GOAL2)
+
+Phase-0'da MF/BP/CC dengesi loss katsayisi ile degil, sampling ile kontrol edilir. Varsayilan oran `mf=0.6`, `bp=0.2`, `cc=0.2` olarak gelir; ancak tamamen config'den degistirilebilir:
+
+```python
+"go_sampling_enabled": True,
+"go_sampling_ratio": {"mf": 0.6, "bp": 0.2, "cc": 0.2},
+"go_log_sampling_stats": True,
+```
+
+Boylece "hangi ontolojiden ne oranda sample aliyoruz?" sorusunun cevabi sabit kod yerine dogrudan konfigrasyonda tutulur; deneyden deneye kolayca override edilebilir.
+
 ## Notlar
 
 - `run.ipynb` dosyasi Colab icin hazirlanmistir; yerel kullanimda `train.py` daha net bir baslangic noktasi sunar.

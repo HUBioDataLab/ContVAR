@@ -91,6 +91,11 @@ class ProjectConfig:
         self.go_margin = 0.2
         self.go_batch_size = 8
         self.go_lr = 1e-4
+        # Ontology sampling in phase-0 (GOAL2): use ratio-driven ontology picks.
+        # Disable to preserve legacy behavior (one batch from each ontology per step).
+        self.go_sampling_enabled = True
+        self.go_sampling_ratio = {"mf": 0.6, "bp": 0.2, "cc": 0.2}
+        self.go_log_sampling_stats = True
         # Limit and loader settings for GO pretraining
         self.go_max_triplets_per_ontology = 1000  # subsample for Colab; can be overridden
         self.go_num_workers = 0  # DataLoader workers for GO (0 is safer on Colab)

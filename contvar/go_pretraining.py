@@ -1,4 +1,5 @@
 import os
+import random
 from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
@@ -28,6 +29,69 @@ def _infinite_batches(loader: DataLoader):
     while True:
         for batch in loader:
             yield batch
+
+
+def _normalize_sampling_ratio(
+    raw_ratio, active_ontologies: List[str]
+) -> Dict[str, float]:
+    """
+    Build a valid probability map over active ontologies.
+    Supports dict-like {"mf": 0.6, "bp": 0.2, "cc": 0.2} or list/tuple in
+    ontology order (mf, bp, cc). Falls back to uniform if invalid.
+    """
+    if not active_ontologies:
+        return {}
+
+    weights: Dict[str, float] = {ont: 0.0 for ont in active_ontologies}
+
+    if isinstance(raw_ratio, dict):
+        for ont in active_ontologies:
+            try:
+                weights[ont] = max(float(raw_ratio.get(ont, 0.0)), 0.0)
+            except (TypeError, ValueError):
+                weights[ont] = 0.0
+    elif isinstance(raw_ratio, (tuple, list)):
+        for ont, w in zip(_GO_ONTOLOGY_ORDER, raw_ratio):
+            if ont not in weights:
+                continue
+            try:
+                weights[ont] = max(float(w), 0.0)
+            except (TypeError, ValueError):
+                weights[ont] = 0.0
+
+    total = sum(weights.values())
+    if total <= 0:
+        uniform = 1.0 / float(len(active_ontologies))
+        return {ont: uniform for ont in active_ontologies}
+
+    return {ont: weights[ont] / total for ont in active_ontologies}
+
+
+def _weighted_pick_ontology(
+    candidates: List[str], ratio_map: Dict[str, float], rng: random.Random
+) -> str:
+    """Pick one ontology from candidates using ratio_map weights."""
+    if len(candidates) == 1:
+        return candidates[0]
+
+    weights = [max(float(ratio_map.get(ont, 0.0)), 0.0) for ont in candidates]
+    total = sum(weights)
+    if total <= 0:
+        weights = [1.0 for _ in candidates]
+        total = float(len(candidates))
+
+    pick = rng.random() * total
+    running = 0.0
+    for ont, w in zip(candidates, weights):
+        running += w
+        if pick <= running:
+            return ont
+    return candidates[-1]
+
+
+def _triplet_batch_size(batch_triplet: Tuple[Batch, Batch, Batch]) -> int:
+    ba, _, _ = batch_triplet
+    return int(getattr(ba, "num_graphs", 0)) or 0
 
 
 def _compute_go_phase0_loss(
@@ -277,17 +341,35 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
 
     model.to(device)
 
+    sampling_enabled = bool(getattr(cfg, "go_sampling_enabled", False))
+    ratio_map = _normalize_sampling_ratio(
+        getattr(cfg, "go_sampling_ratio", None), active_ontologies
+    )
+    log_sampling_stats = bool(getattr(cfg, "go_log_sampling_stats", True))
+    if sampling_enabled:
+        ratio_txt = ", ".join(
+            f"{ont}:{ratio_map.get(ont, 0.0):.2f}" for ont in active_ontologies
+        )
+        print(f"[Phase0] Sampling mode enabled | ratios={ratio_txt}")
+
     for epoch in range(cfg.go_phase0_epochs):
         model.train()
         epoch_loss = 0.0
         epoch_steps = 0
 
-        # One training step = one batch per ontology (cycled), loss = mean
-        # over available ontologies (pseudocode-style).
         gens: Dict[str, Iterator] = {
             ont: _infinite_batches(loaders[ont]) for ont in active_ontologies
         }
-        n_steps = max(len(loaders[ont]) for ont in active_ontologies)
+        if sampling_enabled:
+            # Keep epoch throughput comparable to previous loop:
+            # previously each step consumed all ontologies.
+            n_steps = sum(len(loaders[ont]) for ont in active_ontologies)
+        else:
+            # Legacy behavior: one batch per ontology per step.
+            n_steps = max(len(loaders[ont]) for ont in active_ontologies)
+        rng = random.Random(int(getattr(cfg, "go_split_seed", 42)) + epoch)
+        sampled_step_counts = {ont: 0 for ont in active_ontologies}
+        sampled_batch_counts = {ont: 0 for ont in active_ontologies}
 
         pbar = tqdm(
             range(n_steps),
@@ -296,10 +378,26 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         )
         for _ in pbar:
             batch_dict = {}
-            for ont in active_ontologies:
-                b = next(gens[ont])
-                if b is not None:
+            if sampling_enabled:
+                tried = set()
+                while len(tried) < len(active_ontologies):
+                    remaining = [o for o in active_ontologies if o not in tried]
+                    ont = _weighted_pick_ontology(remaining, ratio_map, rng)
+                    tried.add(ont)
+                    b = next(gens[ont])
+                    if b is None:
+                        continue
                     batch_dict[ont] = b
+                    sampled_step_counts[ont] += 1
+                    sampled_batch_counts[ont] += _triplet_batch_size(b)
+                    break
+            else:
+                for ont in active_ontologies:
+                    b = next(gens[ont])
+                    if b is not None:
+                        batch_dict[ont] = b
+                        sampled_step_counts[ont] += 1
+                        sampled_batch_counts[ont] += _triplet_batch_size(b)
 
             loss, per_ont = _compute_go_phase0_loss(
                 model,
@@ -336,6 +434,27 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
             avg_loss = 0.0
 
         wandb.log({"phase0/epoch_loss": avg_loss, "phase0/epoch": epoch + 1})
+        if log_sampling_stats:
+            total_sampled_steps = sum(sampled_step_counts.values())
+            total_sampled_batches = sum(sampled_batch_counts.values())
+            sampling_log = {"phase0/epoch": epoch + 1}
+            for ont in active_ontologies:
+                sampling_log[f"phase0/sampling/steps_{ont}"] = sampled_step_counts[ont]
+                sampling_log[f"phase0/sampling/samples_{ont}"] = sampled_batch_counts[ont]
+                sampling_log[f"phase0/sampling/target_ratio_{ont}"] = ratio_map.get(
+                    ont, 0.0
+                )
+                sampling_log[f"phase0/sampling/actual_step_ratio_{ont}"] = (
+                    (sampled_step_counts[ont] / total_sampled_steps)
+                    if total_sampled_steps > 0
+                    else 0.0
+                )
+                sampling_log[f"phase0/sampling/actual_sample_ratio_{ont}"] = (
+                    (sampled_batch_counts[ont] / total_sampled_batches)
+                    if total_sampled_batches > 0
+                    else 0.0
+                )
+            wandb.log(sampling_log)
         print(
             f"[Phase0] Epoch {epoch+1}/{cfg.go_phase0_epochs} | "
             f"Avg Loss: {avg_loss:.4f}"
