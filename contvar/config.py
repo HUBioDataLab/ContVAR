@@ -122,6 +122,9 @@ class ProjectConfig:
         self.go_prebuilt_graph_root = None
         # If True, fallback to CIF->graph construction when .pt is missing.
         self.go_build_graph_if_missing = True
+        # If True, ignore identity-grouped split and create train/val/test directly
+        # from prebuilt protein IDs using go_train_ratio/go_val_ratio/go_test_ratio.
+        self.go_random_split_from_prebuilt = False
 
         # Phase-0: identity-aware train/val/test split (sequence groups, e.g. UniRef50)
         # "none" = use all triplets (legacy). "identity_grouped" = filter by cluster split.

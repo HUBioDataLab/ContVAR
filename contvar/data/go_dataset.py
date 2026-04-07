@@ -135,6 +135,24 @@ class GOSemanticTripletDataset(Dataset):
                 f"{before:,} -> {len(self.triplets):,} triplets (identity filter)"
             )
 
+        # In prebuilt-only mode, keep only triplets whose all proteins
+        # (anchor/positive/negative) exist as prebuilt .pt graphs.
+        if self.prebuilt_graph_root and not self.build_graph_if_missing:
+            before = len(self.triplets)
+            available_ids = self._get_available_prebuilt_ids()
+            self.triplets = [
+                (a, p, n)
+                for (a, p, n) in self.triplets
+                if a.lower() in available_ids
+                and p.lower() in available_ids
+                and n.lower() in available_ids
+            ]
+            print(
+                f"[GO-{self.ontology}] Prebuilt-only filter: "
+                f"{before:,} -> {len(self.triplets):,} triplets "
+                f"(available proteins={len(available_ids):,})"
+            )
+
         # Optional subsampling to keep phase-0 manageable on limited hardware
         max_triplets = getattr(self.config, "go_max_triplets_per_ontology", None)
         if max_triplets is not None and len(self.triplets) > max_triplets:
@@ -280,6 +298,20 @@ class GOSemanticTripletDataset(Dataset):
             self.__class__._global_pt_path_index[root_key] = index
 
         return index.get(pid_lower)
+
+    def _get_available_prebuilt_ids(self) -> set:
+        if not self.prebuilt_graph_root:
+            return set()
+        if not os.path.exists(self.prebuilt_graph_root):
+            return set()
+
+        root_key = os.path.abspath(self.prebuilt_graph_root)
+        index = self.__class__._global_pt_path_index.get(root_key)
+        if index is None:
+            # Build index once via existing helper path.
+            self._id_to_prebuilt_graph_path("__index_warmup__")
+            index = self.__class__._global_pt_path_index.get(root_key, {})
+        return set(index.keys())
 
     def _build_graph(self, protein_id: str) -> Optional[Data]:
         # First try prebuilt .pt graphs if a folder is configured.

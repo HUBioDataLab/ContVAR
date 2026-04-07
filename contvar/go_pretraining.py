@@ -94,6 +94,50 @@ def _triplet_batch_size(batch_triplet: Tuple[Batch, Batch, Batch]) -> int:
     return int(getattr(ba, "num_graphs", 0)) or 0
 
 
+def _collect_prebuilt_protein_ids(prebuilt_graph_root: str) -> List[str]:
+    ids = set()
+    if not prebuilt_graph_root or not os.path.exists(prebuilt_graph_root):
+        return []
+    for root, _, files in os.walk(prebuilt_graph_root):
+        for fname in files:
+            if not fname.lower().endswith(".pt"):
+                continue
+            base = os.path.splitext(fname)[0].lower()
+            pid = base.split("_", 1)[0]
+            if pid:
+                ids.add(pid)
+    return sorted(ids)
+
+
+def _build_random_prebuilt_split(cfg: ProjectConfig, protein_ids: List[str]) -> Dict[str, str]:
+    rng = random.Random(int(getattr(cfg, "go_split_seed", 42)))
+    ids = list(protein_ids)
+    rng.shuffle(ids)
+
+    rt = float(getattr(cfg, "go_train_ratio", 0.8))
+    rv = float(getattr(cfg, "go_val_ratio", 0.1))
+    rte = float(getattr(cfg, "go_test_ratio", 0.1))
+    total = rt + rv + rte
+    if total <= 0:
+        rt, rv, rte = 0.8, 0.1, 0.1
+        total = 1.0
+    rt, rv, rte = rt / total, rv / total, rte / total
+
+    n = len(ids)
+    n_train = int(n * rt)
+    n_val = int(n * rv)
+    n_test = n - n_train - n_val
+
+    split_map: Dict[str, str] = {}
+    for pid in ids[:n_train]:
+        split_map[pid] = "train"
+    for pid in ids[n_train:n_train + n_val]:
+        split_map[pid] = "val"
+    for pid in ids[n_train + n_val:n_train + n_val + n_test]:
+        split_map[pid] = "test"
+    return split_map
+
+
 def _compute_go_phase0_loss(
     model,
     batch_dict: Dict[str, Tuple[Batch, Batch, Batch]],
@@ -268,22 +312,42 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         tsv_dir, "semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv"
     )
 
-    protein_to_split: Optional[dict] = None
-    if getattr(cfg, "go_split_mode", "none") == "identity_grouped":
-        protein_to_split, _ = resolve_phase0_split(cfg, mf_tsv, bp_tsv, cc_tsv)
-
-    # Optional embeddings for node features
-    esm_embeddings = None
-    if getattr(cfg, "go_use_esm_embeddings", True) and cfg.go_embeddings_path:
-        print(f"[Phase0] Loading GO ESM2 embeddings from: {cfg.go_embeddings_path}")
-        esm_embeddings = load_all_embeddings(cfg.go_embeddings_path)
-
     prebuilt_graph_root = getattr(cfg, "go_prebuilt_graph_root", None)
     use_prebuilt_graphs = bool(getattr(cfg, "go_use_prebuilt_graphs", False))
+    build_graph_if_missing = bool(getattr(cfg, "go_build_graph_if_missing", True))
     if use_prebuilt_graphs and prebuilt_graph_root:
         print(f"[Phase0] Using prebuilt GO graphs from: {prebuilt_graph_root}")
     elif use_prebuilt_graphs:
         print("[Phase0] go_use_prebuilt_graphs=True but go_prebuilt_graph_root is empty.")
+
+    protein_to_split: Optional[dict] = None
+    if bool(getattr(cfg, "go_random_split_from_prebuilt", False)):
+        prebuilt_ids = _collect_prebuilt_protein_ids(prebuilt_graph_root)
+        protein_to_split = _build_random_prebuilt_split(cfg, prebuilt_ids)
+        n_train = sum(1 for s in protein_to_split.values() if s == "train")
+        n_val = sum(1 for s in protein_to_split.values() if s == "val")
+        n_test = sum(1 for s in protein_to_split.values() if s == "test")
+        print(
+            f"[Phase0] Prebuilt random split from proteins: total={len(protein_to_split):,} "
+            f"| train={n_train:,} val={n_val:,} test={n_test:,}"
+        )
+    elif getattr(cfg, "go_split_mode", "none") == "identity_grouped":
+        protein_to_split, _ = resolve_phase0_split(cfg, mf_tsv, bp_tsv, cc_tsv)
+
+    # Optional embeddings for node features.
+    # If we only use prebuilt .pt graphs and disable fallback building,
+    # loading the huge H5 is unnecessary.
+    esm_embeddings = None
+    should_load_esm = (
+        bool(getattr(cfg, "go_use_esm_embeddings", True))
+        and bool(cfg.go_embeddings_path)
+        and (not use_prebuilt_graphs or build_graph_if_missing)
+    )
+    if should_load_esm:
+        print(f"[Phase0] Loading GO ESM2 embeddings from: {cfg.go_embeddings_path}")
+        esm_embeddings = load_all_embeddings(cfg.go_embeddings_path)
+    elif bool(getattr(cfg, "go_use_esm_embeddings", True)) and use_prebuilt_graphs and not build_graph_if_missing:
+        print("[Phase0] Skipping GO ESM2 embedding load (prebuilt-only mode).")
 
     def make_loaders_for_split(split_name: Optional[str], shuffle: bool):
         out: Dict[str, DataLoader] = {}
@@ -302,7 +366,7 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                 phase0_split=ps,
                 protein_to_split=pt,
                 prebuilt_graph_root=prebuilt_graph_root if use_prebuilt_graphs else None,
-                build_graph_if_missing=bool(getattr(cfg, "go_build_graph_if_missing", True)),
+                build_graph_if_missing=build_graph_if_missing,
             )
             if loader is not None:
                 out[ont] = loader
@@ -336,7 +400,7 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                     esm2_embeddings=esm_embeddings,
                     shuffle=True,
                     prebuilt_graph_root=prebuilt_graph_root if use_prebuilt_graphs else None,
-                    build_graph_if_missing=bool(getattr(cfg, "go_build_graph_if_missing", True)),
+                    build_graph_if_missing=build_graph_if_missing,
                 )
                 if loader is not None:
                     loaders[ont] = loader
