@@ -29,6 +29,30 @@ class GOSemanticTripletDataset(Dataset):
         * bin_mid:   [0.1, 0.2]
     """
 
+    # Global (per-process) index: structure_root -> {protein_id_lower: cif_path}.
+    # This avoids calling `os.walk(...)` for every protein ID.
+    _global_cif_path_index: Dict[str, Dict[str, str]] = {}
+    # Global (per-process) index: prebuilt_graph_root -> {protein_id_lower: pt_path}.
+    _global_pt_path_index: Dict[str, Dict[str, str]] = {}
+
+    @staticmethod
+    def _normalize_embedding_key(raw_id: str) -> str:
+        key = raw_id.lower()
+        if key.endswith("_model"):
+            key = key[:-6]
+        return key
+
+    @staticmethod
+    def _build_name_to_embedding_index(g) -> Dict[str, int]:
+        node_order = []
+        for node_name, _ in g.nodes(data=True):
+            parts = node_name.split(":")
+            node_chain = parts[0]
+            node_resseq = int(parts[2])
+            node_order.append((node_chain, node_resseq, node_name))
+        node_order.sort(key=lambda x: (x[0], x[1]))
+        return {name: i for i, (_, _, name) in enumerate(node_order)}
+
     def __init__(
         self,
         tsv_path: str,
@@ -44,6 +68,8 @@ class GOSemanticTripletDataset(Dataset):
         neg_high: float = 0.2,
         phase0_split: Optional[Literal["train", "val", "test"]] = None,
         protein_to_split: Optional[Dict[str, str]] = None,
+        prebuilt_graph_root: Optional[str] = None,
+        build_graph_if_missing: bool = True,
     ):
         super().__init__()
         self.tsv_path = tsv_path
@@ -67,6 +93,8 @@ class GOSemanticTripletDataset(Dataset):
         self.neg_high = neg_high
         self.phase0_split = phase0_split
         self.protein_to_split = protein_to_split
+        self.prebuilt_graph_root = prebuilt_graph_root
+        self.build_graph_if_missing = build_graph_if_missing
 
         # Graph-building helpers (SALAD-style by default)
         self.node_metadata_funcs = self.config.get_active_node_metadata_funcs()
@@ -211,21 +239,64 @@ class GOSemanticTripletDataset(Dataset):
         # while TSVs may contain uppercase IDs. Normalise to lowercase for
         # matching so that, e.g., "A0A009IHW8" matches "a0a009ihw8_wt_model.cif".
         pid_lower = protein_id.lower()
-        target_prefix = f"{pid_lower}_"
 
-        for root, _, files in os.walk(self.structure_root):
-            for fname in files:
-                if not fname.lower().endswith(".cif"):
-                    continue
+        root_key = os.path.abspath(self.structure_root)
+        index = self.__class__._global_cif_path_index.get(root_key)
+        if index is None:
+            index = {}
+            for root, _, files in os.walk(self.structure_root):
+                for fname in files:
+                    if not fname.lower().endswith(".cif"):
+                        continue
+                    # Expected pattern: "<id>_*.cif" (e.g. a0a009ihw8_wt_model.cif)
+                    # Map by prefix before the first underscore.
+                    base = os.path.splitext(fname)[0].lower()
+                    prefix = base.split("_", 1)[0]
+                    if prefix:
+                        index[prefix] = os.path.join(root, fname)
+            self.__class__._global_cif_path_index[root_key] = index
 
-                fname_lower = fname.lower()
-                # Basic pattern: "<id>_*.cif" (e.g. a0a009ihw8_wt_model.cif)
-                if fname_lower.startswith(target_prefix):
-                    return os.path.join(root, fname)
+        return index.get(pid_lower)
 
-        return None
+    def _id_to_prebuilt_graph_path(self, protein_id: str) -> Optional[str]:
+        if not self.prebuilt_graph_root:
+            return None
+        if not os.path.exists(self.prebuilt_graph_root):
+            return None
+
+        pid_lower = protein_id.lower()
+        root_key = os.path.abspath(self.prebuilt_graph_root)
+        index = self.__class__._global_pt_path_index.get(root_key)
+        if index is None:
+            index = {}
+            for root, _, files in os.walk(self.prebuilt_graph_root):
+                for fname in files:
+                    if not fname.lower().endswith(".pt"):
+                        continue
+                    base = os.path.splitext(fname)[0].lower()
+                    prefix = base.split("_", 1)[0]
+                    if prefix:
+                        index[prefix] = os.path.join(root, fname)
+            self.__class__._global_pt_path_index[root_key] = index
+
+        return index.get(pid_lower)
 
     def _build_graph(self, protein_id: str) -> Optional[Data]:
+        # First try prebuilt .pt graphs if a folder is configured.
+        prebuilt_path = self._id_to_prebuilt_graph_path(protein_id)
+        if prebuilt_path is not None:
+            try:
+                data = torch.load(prebuilt_path, weights_only=False)
+                if isinstance(data, Data):
+                    return data
+                return None
+            except Exception:
+                return None
+
+        # Optional fallback: build from CIF files when prebuilt graph is missing.
+        if not self.build_graph_if_missing:
+            return None
+
         path = self._id_to_path(protein_id)
         if path is None:
             return None
@@ -259,10 +330,27 @@ class GOSemanticTripletDataset(Dataset):
             if g is None or len(g.nodes()) == 0:
                 return None
 
+            protein_embedding = None
+            if self.esm2_embeddings:
+                emb_key = self._normalize_embedding_key(protein_id)
+                protein_embedding = self.esm2_embeddings.get(emb_key)
+            if self.esm2_embeddings and protein_embedding is None:
+                return None
+
+            name_to_emb_idx = None
+            if protein_embedding is not None:
+                name_to_emb_idx = self._build_name_to_embedding_index(g)
+
             # Node features
             node_features = []
             coords_list = []
-            for _, d in g.nodes(data=True):
+            for n, d in g.nodes(data=True):
+                if protein_embedding is not None:
+                    emb_idx = name_to_emb_idx.get(n) if name_to_emb_idx is not None else None
+                    if emb_idx is None or emb_idx < 0 or emb_idx >= len(protein_embedding):
+                        return None
+                    d["embedding"] = protein_embedding[emb_idx]
+
                 fv = []
                 for k in self.node_attributes:
                     v = d.get(k)
@@ -272,18 +360,6 @@ class GOSemanticTripletDataset(Dataset):
                         fv.extend(list(v))
                     else:
                         fv.append(v)
-
-                # If ESM2 embeddings were provided, append them so that
-                # node feature dimensionality matches ProjectConfig.input_dim.
-                if self.esm2_embeddings:
-                    # Keys in load_all_embeddings are lowercased to match h5 IDs / TSV casing
-                    emb = self.esm2_embeddings.get(protein_id.lower())
-                    if emb is None:
-                        # If embeddings are expected but missing for this ID,
-                        # treat the graph as unusable so the dataset can
-                        # resample another triplet.
-                        return None
-                    fv.extend(list(emb))
 
                 node_features.append(fv)
                 coords_list.append(d["coords"])

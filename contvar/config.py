@@ -116,6 +116,12 @@ class ProjectConfig:
         # Colab example: /content/drive/MyDrive/ContVAR/esm2_t33_650M_UR50D_protein_embedding.h5
         self.go_embeddings_path = None
         self.go_use_esm_embeddings = False
+        # Optional prebuilt PyG graphs for GO Phase 0 (stored as .pt files).
+        # If enabled, dataset first tries loading from this directory.
+        self.go_use_prebuilt_graphs = False
+        self.go_prebuilt_graph_root = None
+        # If True, fallback to CIF->graph construction when .pt is missing.
+        self.go_build_graph_if_missing = True
 
         # Phase-0: identity-aware train/val/test split (sequence groups, e.g. UniRef50)
         # "none" = use all triplets (legacy). "identity_grouped" = filter by cluster split.

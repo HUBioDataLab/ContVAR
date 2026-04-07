@@ -195,6 +195,8 @@ def _build_go_loader(
     shuffle: bool,
     phase0_split: Optional[str] = None,
     protein_to_split: Optional[dict] = None,
+    prebuilt_graph_root: Optional[str] = None,
+    build_graph_if_missing: bool = True,
 ) -> Optional[DataLoader]:
     dataset = GOSemanticTripletDataset(
         tsv_path=tsv_path,
@@ -204,6 +206,8 @@ def _build_go_loader(
         esm2_embeddings=esm2_embeddings,
         phase0_split=phase0_split,
         protein_to_split=protein_to_split,
+        prebuilt_graph_root=prebuilt_graph_root,
+        build_graph_if_missing=build_graph_if_missing,
     )
     if len(dataset) == 0:
         return None
@@ -274,6 +278,13 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         print(f"[Phase0] Loading GO ESM2 embeddings from: {cfg.go_embeddings_path}")
         esm_embeddings = load_all_embeddings(cfg.go_embeddings_path)
 
+    prebuilt_graph_root = getattr(cfg, "go_prebuilt_graph_root", None)
+    use_prebuilt_graphs = bool(getattr(cfg, "go_use_prebuilt_graphs", False))
+    if use_prebuilt_graphs and prebuilt_graph_root:
+        print(f"[Phase0] Using prebuilt GO graphs from: {prebuilt_graph_root}")
+    elif use_prebuilt_graphs:
+        print("[Phase0] go_use_prebuilt_graphs=True but go_prebuilt_graph_root is empty.")
+
     def make_loaders_for_split(split_name: Optional[str], shuffle: bool):
         out: Dict[str, DataLoader] = {}
         for ont, path in [("mf", mf_tsv), ("bp", bp_tsv), ("cc", cc_tsv)]:
@@ -290,6 +301,8 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                 shuffle=shuffle,
                 phase0_split=ps,
                 protein_to_split=pt,
+                prebuilt_graph_root=prebuilt_graph_root if use_prebuilt_graphs else None,
+                build_graph_if_missing=bool(getattr(cfg, "go_build_graph_if_missing", True)),
             )
             if loader is not None:
                 out[ont] = loader
@@ -322,6 +335,8 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                     structure_root=cfg.go_structure_root,
                     esm2_embeddings=esm_embeddings,
                     shuffle=True,
+                    prebuilt_graph_root=prebuilt_graph_root if use_prebuilt_graphs else None,
+                    build_graph_if_missing=bool(getattr(cfg, "go_build_graph_if_missing", True)),
                 )
                 if loader is not None:
                     loaders[ont] = loader
