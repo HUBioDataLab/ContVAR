@@ -278,16 +278,17 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
 
     print("\n=== Phase 0: GO Semantic Similarity Pretraining ===")
 
-    # If GO structures are provided as a ZIP archive, extract them lazily.
-    # This is especially useful on Colab, where the zip lives on Drive.
-    if getattr(cfg, "go_structures_zip", None):
+    prebuilt_graph_root = getattr(cfg, "go_prebuilt_graph_root", None)
+    use_prebuilt_graphs = bool(getattr(cfg, "go_use_prebuilt_graphs", True))
+    build_graph_if_missing = bool(getattr(cfg, "go_build_graph_if_missing", False))
+
+    # ZIP extraction is only relevant when CIF fallback is active.
+    if getattr(cfg, "go_structures_zip", None) and (not use_prebuilt_graphs or build_graph_if_missing):
         zip_path = cfg.go_structures_zip
 
-        # Derive a default root folder from the zip name if not provided.
         if not getattr(cfg, "go_structure_root", None):
             base = os.path.splitext(os.path.basename(zip_path))[0]
-            # On Colab we typically work under /content; user can still override.
-            cfg.go_structure_root = os.path.join("/content/content", base)
+            cfg.go_structure_root = os.path.join(os.path.dirname(zip_path), base)
 
         if not os.path.exists(cfg.go_structure_root):
             os.makedirs(cfg.go_structure_root, exist_ok=True)
@@ -312,9 +313,6 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         tsv_dir, "semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv"
     )
 
-    prebuilt_graph_root = getattr(cfg, "go_prebuilt_graph_root", None)
-    use_prebuilt_graphs = bool(getattr(cfg, "go_use_prebuilt_graphs", False))
-    build_graph_if_missing = bool(getattr(cfg, "go_build_graph_if_missing", True))
     if use_prebuilt_graphs and prebuilt_graph_root:
         print(f"[Phase0] Using prebuilt GO graphs from: {prebuilt_graph_root}")
     elif use_prebuilt_graphs:
