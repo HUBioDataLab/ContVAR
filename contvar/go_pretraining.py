@@ -12,7 +12,6 @@ from torch_geometric.data import Batch
 from contvar.config import ProjectConfig
 from contvar.data.go_dataset import GOSemanticTripletDataset
 from contvar.go_identity_split import resolve_phase0_split
-from contvar.utils import load_all_embeddings
 
 # Ontology order matches meeting pseudocode (MF → BP → CC).
 _GO_ONTOLOGY_ORDER: Tuple[str, ...] = ("mf", "bp", "cc")
@@ -234,24 +233,18 @@ def _build_go_loader(
     tsv_path: str,
     ontology: str,
     cfg: ProjectConfig,
-    structure_root: str,
-    esm2_embeddings: Optional[dict],
+    prebuilt_graph_root: str,
     shuffle: bool,
     phase0_split: Optional[str] = None,
     protein_to_split: Optional[dict] = None,
-    prebuilt_graph_root: Optional[str] = None,
-    build_graph_if_missing: bool = True,
 ) -> Optional[DataLoader]:
     dataset = GOSemanticTripletDataset(
         tsv_path=tsv_path,
         ontology=ontology,
         config=cfg,
-        structure_root=structure_root,
-        esm2_embeddings=esm2_embeddings,
+        prebuilt_graph_root=prebuilt_graph_root,
         phase0_split=phase0_split,
         protein_to_split=protein_to_split,
-        prebuilt_graph_root=prebuilt_graph_root,
-        build_graph_if_missing=build_graph_if_missing,
     )
     if len(dataset) == 0:
         return None
@@ -278,27 +271,13 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
 
     print("\n=== Phase 0: GO Semantic Similarity Pretraining ===")
 
-    # If GO structures are provided as a ZIP archive, extract them lazily.
-    # This is especially useful on Colab, where the zip lives on Drive.
-    if getattr(cfg, "go_structures_zip", None):
-        zip_path = cfg.go_structures_zip
-
-        # Derive a default root folder from the zip name if not provided.
-        if not getattr(cfg, "go_structure_root", None):
-            base = os.path.splitext(os.path.basename(zip_path))[0]
-            # On Colab we typically work under /content; user can still override.
-            cfg.go_structure_root = os.path.join("/content/content", base)
-
-        if not os.path.exists(cfg.go_structure_root):
-            os.makedirs(cfg.go_structure_root, exist_ok=True)
-            if os.path.exists(zip_path):
-                import zipfile
-                print(f"[Phase0] Extracting GO structures from ZIP: {zip_path}")
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    zf.extractall(cfg.go_structure_root)
-                print(f"[Phase0] Extracted GO structures to: {cfg.go_structure_root}")
-            else:
-                print(f"[Phase0] WARNING: go_structures_zip={zip_path} does not exist; continuing without unzip.")
+    prebuilt_graph_root = getattr(cfg, "go_prebuilt_graph_root", None)
+    if not prebuilt_graph_root or not os.path.isdir(prebuilt_graph_root):
+        raise FileNotFoundError(
+            "Phase 0 requires go_prebuilt_graph_root to be set to a directory of prebuilt "
+            f"PyG graph .pt files (got {prebuilt_graph_root!r})."
+        )
+    print(f"[Phase0] Prebuilt GO graphs: {prebuilt_graph_root}")
 
     # Resolve TSV paths
     tsv_dir = cfg.go_tsv_dir
@@ -311,14 +290,6 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
     cc_tsv = os.path.join(
         tsv_dir, "semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv"
     )
-
-    prebuilt_graph_root = getattr(cfg, "go_prebuilt_graph_root", None)
-    use_prebuilt_graphs = bool(getattr(cfg, "go_use_prebuilt_graphs", False))
-    build_graph_if_missing = bool(getattr(cfg, "go_build_graph_if_missing", True))
-    if use_prebuilt_graphs and prebuilt_graph_root:
-        print(f"[Phase0] Using prebuilt GO graphs from: {prebuilt_graph_root}")
-    elif use_prebuilt_graphs:
-        print("[Phase0] go_use_prebuilt_graphs=True but go_prebuilt_graph_root is empty.")
 
     protein_to_split: Optional[dict] = None
     if bool(getattr(cfg, "go_random_split_from_prebuilt", False)):
@@ -334,21 +305,6 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
     elif getattr(cfg, "go_split_mode", "none") == "identity_grouped":
         protein_to_split, _ = resolve_phase0_split(cfg, mf_tsv, bp_tsv, cc_tsv)
 
-    # Optional embeddings for node features.
-    # If we only use prebuilt .pt graphs and disable fallback building,
-    # loading the huge H5 is unnecessary.
-    esm_embeddings = None
-    should_load_esm = (
-        bool(getattr(cfg, "go_use_esm_embeddings", True))
-        and bool(cfg.go_embeddings_path)
-        and (not use_prebuilt_graphs or build_graph_if_missing)
-    )
-    if should_load_esm:
-        print(f"[Phase0] Loading GO ESM2 embeddings from: {cfg.go_embeddings_path}")
-        esm_embeddings = load_all_embeddings(cfg.go_embeddings_path)
-    elif bool(getattr(cfg, "go_use_esm_embeddings", True)) and use_prebuilt_graphs and not build_graph_if_missing:
-        print("[Phase0] Skipping GO ESM2 embedding load (prebuilt-only mode).")
-
     def make_loaders_for_split(split_name: Optional[str], shuffle: bool):
         out: Dict[str, DataLoader] = {}
         for ont, path in [("mf", mf_tsv), ("bp", bp_tsv), ("cc", cc_tsv)]:
@@ -360,13 +316,10 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                 tsv_path=path,
                 ontology=ont,
                 cfg=cfg,
-                structure_root=cfg.go_structure_root,
-                esm2_embeddings=esm_embeddings,
+                prebuilt_graph_root=prebuilt_graph_root,
                 shuffle=shuffle,
                 phase0_split=ps,
                 protein_to_split=pt,
-                prebuilt_graph_root=prebuilt_graph_root if use_prebuilt_graphs else None,
-                build_graph_if_missing=build_graph_if_missing,
             )
             if loader is not None:
                 out[ont] = loader
@@ -396,11 +349,8 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                     tsv_path=path,
                     ontology=ont,
                     cfg=cfg,
-                    structure_root=cfg.go_structure_root,
-                    esm2_embeddings=esm_embeddings,
+                    prebuilt_graph_root=prebuilt_graph_root,
                     shuffle=True,
-                    prebuilt_graph_root=prebuilt_graph_root if use_prebuilt_graphs else None,
-                    build_graph_if_missing=build_graph_if_missing,
                 )
                 if loader is not None:
                     loaders[ont] = loader

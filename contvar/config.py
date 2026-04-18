@@ -105,23 +105,9 @@ class ProjectConfig:
         self.go_tsv_dir = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "semantic_similarity"
         )
-        # Root directory holding structures for GO proteins.
-        # If left as None and go_structures_zip is set, a default
-        # folder will be derived from the zip name (useful on Colab).
-        self.go_structure_root = None
-        # Optional: path to a ZIP file containing GO structures (e.g. on Colab/Drive).
-        # If provided and go_structure_root does not exist yet, it will be extracted there.
-        self.go_structures_zip = None
-        # Optional separate embeddings file for GO Phase 0 (SwissProt-scale h5).
-        # Colab example: /content/drive/MyDrive/ContVAR/esm2_t33_650M_UR50D_protein_embedding.h5
-        self.go_embeddings_path = None
-        self.go_use_esm_embeddings = False
-        # Optional prebuilt PyG graphs for GO Phase 0 (stored as .pt files).
-        # If enabled, dataset first tries loading from this directory.
-        self.go_use_prebuilt_graphs = False
+        # Phase 0 loads protein graphs only from this directory (PyG Data .pt files).
+        # Required when go_phase0_epochs > 0.
         self.go_prebuilt_graph_root = None
-        # If True, fallback to CIF->graph construction when .pt is missing.
-        self.go_build_graph_if_missing = True
         # If True, ignore identity-grouped split and create train/val/test directly
         # from prebuilt protein IDs using go_train_ratio/go_val_ratio/go_test_ratio.
         self.go_random_split_from_prebuilt = False
