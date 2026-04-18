@@ -36,3 +36,5 @@ scripts/generate_phase0_split_bundle.py
 # Local notes / briefs (not tracked)
 GO_DMS_TOPLANTI_NOTU_2026-03-12.md
 PHASE0_TASK_BRIEF.md
+
+graph_prebuilder/
