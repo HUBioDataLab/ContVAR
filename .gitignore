@@ -18,7 +18,6 @@ build/
 _cell_*.py
 contvar_v0.ipynb
 sequence_model/
-graph_prebuilder/
 requirements.txt
 validation (1).py
 

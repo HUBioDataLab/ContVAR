@@ -113,15 +113,15 @@ class ProjectConfig:
         # If provided and go_structure_root does not exist yet, it will be extracted there.
         self.go_structures_zip = None
         # Optional separate embeddings file for GO Phase 0 (SwissProt-scale h5).
-        # Set via go_embeddings_path in config_overrides or PATHS cell.
+        # Colab example: /content/drive/MyDrive/ContVAR/esm2_t33_650M_UR50D_protein_embedding.h5
         self.go_embeddings_path = None
         self.go_use_esm_embeddings = False
         # Optional prebuilt PyG graphs for GO Phase 0 (stored as .pt files).
         # If enabled, dataset first tries loading from this directory.
-        self.go_use_prebuilt_graphs = True
+        self.go_use_prebuilt_graphs = False
         self.go_prebuilt_graph_root = None
         # If True, fallback to CIF->graph construction when .pt is missing.
-        self.go_build_graph_if_missing = False
+        self.go_build_graph_if_missing = True
         # If True, ignore identity-grouped split and create train/val/test directly
         # from prebuilt protein IDs using go_train_ratio/go_val_ratio/go_test_ratio.
         self.go_random_split_from_prebuilt = False
@@ -217,11 +217,8 @@ def setup_environment(data_root=None, embeddings_path=None, data_zip=None):
     """
     Auto-detect Colab vs. local and return configured paths.
 
-    All paths should be provided explicitly via the PATHS configuration cell
-    in run.ipynb. Local (non-Colab) mode falls back to project-relative defaults.
-
     Returns:
-        dict with keys: device, data_root, embeddings_path
+        dict with keys: device, data_root, embeddings_path, data_zip
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -229,21 +226,23 @@ def setup_environment(data_root=None, embeddings_path=None, data_zip=None):
     is_colab = 'google.colab' in sys.modules
 
     if is_colab:
-        if data_root is None or embeddings_path is None:
-            print(
-                "WARNING: data_root / embeddings_path not provided on Colab. "
-                "Set them in the PATHS configuration cell of run.ipynb."
-            )
+        if data_root is None:
+            data_root = "/content/content/content/protein_triplets_data"
+        if embeddings_path is None:
+            embeddings_path = "/content/drive/MyDrive/ContVAR/embeddings_variable.h5"
+        if data_zip is None:
+            data_zip = "/content/drive/MyDrive/ContVAR/protein_triplets_data_9march.zip"
 
+        # Unzip data if needed
         if not os.path.exists(data_root) and data_zip and os.path.exists(data_zip):
             import zipfile
-            extract_to = os.path.dirname(data_root)
-            print(f"Unzipping {data_zip} to {extract_to}...")
+            print(f"Unzipping {data_zip} to /content/...")
             with zipfile.ZipFile(data_zip, 'r') as zip_ref:
-                zip_ref.extractall(extract_to)
+                zip_ref.extractall("/content/")
             print("Unzipping complete.")
     else:
         if data_root is None:
+            # Default local path: relative to project root
             data_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "protein_triplets_data")
         if embeddings_path is None:
             embeddings_path = os.path.join(data_root, "..", "embeddings_variable.h5")
