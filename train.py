@@ -36,6 +36,7 @@ def main():
         data_root=env['data_root'],
         embeddings_path=env['embeddings_path'],
         device=env['device'],
+        data_zip=env.get('data_zip'),
     )
 
     if args.visualize and model is not None:

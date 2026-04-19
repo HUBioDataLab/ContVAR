@@ -199,12 +199,62 @@ class ProjectConfig:
         return attrs
 
 
-def setup_environment(data_root=None, embeddings_path=None, data_zip=None):
+# Colab defaults for DMS triplets (zip on Drive, extracted under /content/...)
+_COLAB_DEFAULT_DATA_ROOT = "/content/content/content/protein_triplets_data"
+_COLAB_DEFAULT_DATA_ZIP = "/content/drive/MyDrive/ContVAR/protein_triplets_data_9march.zip"
+_COLAB_DEFAULT_EMBEDDINGS = "/content/drive/MyDrive/ContVAR/embeddings_variable.h5"
+
+
+def ensure_dms_triplets_unzipped(data_root, data_zip=None):
+    """
+    Extract the DMS protein_triplets zip if the expected folder is missing.
+
+    Intended for Colab: call from train_pipeline so Step 3 can use
+    setup_environment(prepare_dms_triplets_zip=False) without a long unzip.
+
+    No-op if data_root already exists, or zip path is missing / file not found.
+    """
+    if data_root and os.path.isdir(data_root):
+        return
+
+    is_colab = "google.colab" in sys.modules
+    if data_zip is None and is_colab:
+        data_zip = _COLAB_DEFAULT_DATA_ZIP
+
+    if not data_zip or not os.path.isfile(data_zip):
+        if data_root:
+            print(
+                f"Warning: DMS folder not found ({data_root!r}) and no zip to extract "
+                f"(data_zip={data_zip!r})."
+            )
+        return
+
+    import zipfile
+
+    print(f"Unzipping {data_zip} to /content/...")
+    with zipfile.ZipFile(data_zip, "r") as zip_ref:
+        zip_ref.extractall("/content/")
+    print("Unzipping complete.")
+
+
+def setup_environment(
+    data_root=None,
+    embeddings_path=None,
+    data_zip=None,
+    prepare_dms_triplets_zip=True,
+):
     """
     Auto-detect Colab vs. local and return configured paths.
 
+    Args:
+        prepare_dms_triplets_zip: If True (default), unzip DMS data on Colab when
+            ``data_root`` is missing. Set False for a fast path (e.g. wandb login only);
+            then call ``ensure_dms_triplets_unzipped`` from ``train_pipeline`` before
+            loading triplets.
+
     Returns:
-        dict with keys: device, data_root, embeddings_path, data_zip
+        dict with keys: device, data_root, embeddings_path, data_zip (Colab zip path
+        or None locally)
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -213,14 +263,14 @@ def setup_environment(data_root=None, embeddings_path=None, data_zip=None):
 
     if is_colab:
         if data_root is None:
-            data_root = "/content/content/content/protein_triplets_data"
+            data_root = _COLAB_DEFAULT_DATA_ROOT
         if embeddings_path is None:
-            embeddings_path = "/content/drive/MyDrive/ContVAR/embeddings_variable.h5"
+            embeddings_path = _COLAB_DEFAULT_EMBEDDINGS
         if data_zip is None:
-            data_zip = "/content/drive/MyDrive/ContVAR/protein_triplets_data_9march.zip"
+            data_zip = _COLAB_DEFAULT_DATA_ZIP
 
-        # Unzip data if needed
-        if not os.path.exists(data_root) and data_zip and os.path.exists(data_zip):
+        # Unzip data if needed (optional: defer to train_pipeline via prepare_dms_triplets_zip=False)
+        if prepare_dms_triplets_zip and not os.path.exists(data_root) and data_zip and os.path.exists(data_zip):
             import zipfile
             print(f"Unzipping {data_zip} to /content/...")
             with zipfile.ZipFile(data_zip, 'r') as zip_ref:
@@ -232,9 +282,11 @@ def setup_environment(data_root=None, embeddings_path=None, data_zip=None):
             data_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "protein_triplets_data")
         if embeddings_path is None:
             embeddings_path = os.path.join(data_root, "..", "embeddings_variable.h5")
+        data_zip = None
 
     return {
         'device': device,
         'data_root': data_root,
         'embeddings_path': embeddings_path,
+        'data_zip': data_zip,
     }

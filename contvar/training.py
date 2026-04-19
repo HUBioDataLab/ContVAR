@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 
-from contvar.config import ProjectConfig
+from contvar.config import ProjectConfig, ensure_dms_triplets_unzipped
 from contvar.data.mapper import TripletDataPathMapper
 from contvar.data.dataset import TripletProteinGraphDataset, ExhaustiveTripletDataset
 from contvar.data.collate import triplet_collate
@@ -104,7 +104,8 @@ def evaluate(model, loader, criterion, device, margin=0.3):
 
 
 def train_pipeline(config=None, force=False, split_path=None,
-                   data_root=None, embeddings_path=None, device=None):
+                   data_root=None, embeddings_path=None, device=None,
+                   data_zip=None):
     """
     Main training pipeline with CURRICULUM LEARNING support.
 
@@ -115,6 +116,7 @@ def train_pipeline(config=None, force=False, split_path=None,
         data_root: Path to protein_triplets_data directory
         embeddings_path: Path to ESM2 embeddings h5 file
         device: torch device (auto-detected if None)
+        data_zip: Optional path to protein_triplets zip (Colab); used if folder missing
     """
     # Initialize config
     cfg = ProjectConfig()
@@ -143,6 +145,8 @@ def train_pipeline(config=None, force=False, split_path=None,
         data_root = env['data_root']
         if embeddings_path is None:
             embeddings_path = env['embeddings_path']
+        if data_zip is None:
+            data_zip = env.get("data_zip")
 
     print(f"Training with LR: {cfg.lr}, Hidden: {cfg.hidden_dim}, Heads: {cfg.heads}")
     print(f"Curriculum Learning: {cfg.curriculum_warmup_epochs} warm-up epochs with exhaustive sampling")
@@ -155,19 +159,6 @@ def train_pipeline(config=None, force=False, split_path=None,
               f"min_batches={cfg.phase1_es_min_batches})")
     else:
         print(f"Phase 1 Early Stopping: OFF")
-
-    # Optional Phase 0: GO semantic similarity pretraining
-    # (uses separate semantic_similarity TSVs and GO heads on the encoder)
-    # This runs before the curriculum learning phases.
-
-    # Load data with per-family hold-out split
-    mapper = TripletDataPathMapper(data_root, val_pos=2, val_neg=2, seed=42, split_path=split_path)
-    if not mapper.triplets:
-        print("No data found!")
-        wandb.finish()
-        return
-
-    mapper.save_split()
 
     shared_embeddings = None
     if force and embeddings_path:
@@ -191,9 +182,21 @@ def train_pipeline(config=None, force=False, split_path=None,
 
     val_criterion = standard_criterion
 
-    # Phase 0 GO pretraining (if enabled)
+    # Phase 0: GO semantic pretraining (Drive TSVs + prebuilt PyG graphs). No DMS zip yet.
     if getattr(cfg, "go_phase0_epochs", 0) > 0:
         run_go_pretraining(model, cfg, device)
+
+    # DMS triplets (zip on Colab if needed), then Phase 1 / Phase 2 curriculum.
+    print("\n=== DMS data: unzip if needed, then triplet split (Phase 1+) ===")
+    ensure_dms_triplets_unzipped(data_root, data_zip)
+    mapper = TripletDataPathMapper(
+        data_root, val_pos=2, val_neg=2, seed=42, split_path=split_path
+    )
+    if not mapper.triplets:
+        print("No data found!")
+        wandb.finish()
+        return
+    mapper.save_split()
 
     # =========================================================================
     # CREATE DATASETS FOR CURRICULUM PHASES
