@@ -174,7 +174,29 @@ def train_pipeline(config=None, force=False, split_path=None,
         shared_embeddings = load_all_embeddings(embeddings_path)
 
     # =========================================================================
-    # CREATE DATASETS FOR BOTH PHASES
+    # INITIALIZE MODEL
+    # =========================================================================
+    model = DeepProteinGAT(
+        input_dim=cfg.input_dim,
+        hidden_dim=cfg.hidden_dim,
+        output_dim=cfg.output_dim,
+        heads=cfg.heads,
+        edge_dim=cfg.edge_attr_dim
+    ).to(device)
+
+    optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    standard_criterion = StandardTripletLoss(margin=cfg.margin)
+    semihard_criterion = SemiHardMiningTripletLoss(margin=cfg.margin)
+
+    val_criterion = standard_criterion
+
+    # Phase 0 GO pretraining (if enabled)
+    if getattr(cfg, "go_phase0_epochs", 0) > 0:
+        run_go_pretraining(model, cfg, device)
+
+    # =========================================================================
+    # CREATE DATASETS FOR CURRICULUM PHASES
     # =========================================================================
     print("\n=== Phase 1 Setup: Exhaustive Sampling ===")
 
@@ -220,28 +242,6 @@ def train_pipeline(config=None, force=False, split_path=None,
     print(f"  Phase 1 Train (exhaustive): {len(exhaustive_train_dataset):,} triplets")
     print(f"  Val (exhaustive, both phases): {len(exhaustive_val_dataset):,} triplets")
     print(f"  Phase 2 Train (streaming mining): {len(main_train_dataset.triplets)} families x train negatives")
-
-    # =========================================================================
-    # INITIALIZE MODEL
-    # =========================================================================
-    model = DeepProteinGAT(
-        input_dim=cfg.input_dim,
-        hidden_dim=cfg.hidden_dim,
-        output_dim=cfg.output_dim,
-        heads=cfg.heads,
-        edge_dim=cfg.edge_attr_dim
-    ).to(device)
-
-    optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-
-    standard_criterion = StandardTripletLoss(margin=cfg.margin)
-    semihard_criterion = SemiHardMiningTripletLoss(margin=cfg.margin)
-
-    val_criterion = standard_criterion
-
-    # Phase 0 GO pretraining (if enabled)
-    if getattr(cfg, "go_phase0_epochs", 0) > 0:
-        run_go_pretraining(model, cfg, device)
 
     print("\n" + "="*60)
     print("STARTING CURRICULUM LEARNING")
