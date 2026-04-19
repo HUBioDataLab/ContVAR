@@ -4,148 +4,124 @@
 ![PyTorch](https://img.shields.io/badge/PyTorch-Geometric-orange)
 ![Graphein](https://img.shields.io/badge/Bio-Graphein-green)
 
-**ContVAR**, tek amino asit varyantlarinin (SAV) protein yapisi ve fonksiyonu uzerindeki etkisini graph tabanli metric learning ile modellemek icin gelistirilmis bir projedir.
+**ContVAR**, tek amino asit varyantlarının (SAV) protein yapısı ve fonksiyonu üzerindeki etkisini graf tabanlı metrik öğrenmesi ile modellemek için geliştirilmiş bir projedir.
 
-Model; ayni proteinin:
-- **Anchor**: Wild-type (orijinal),
+Model; aynı proteinin:
+
+- **Anchor**: wild-type (orijinal),
 - **Positive**: benign varyant,
-- **Negative**: pathogenic/malignant varyant
+- **Negative**: pathogenic / malign varyant
 
-uclulerini kullanarak embedding uzayinda benign ornekleri yakina, pathogenic ornekleri uzaga itmeye calisir.
+üçlülerini kullanarak gömme uzayında benign örnekleri yakına, pathogenic örnekleri uzağa itmeye çalışır.
 
-## Proje Yapisi
+## Mimari Özet
 
-Ana dosyalar:
-- `train.py`: egitim giris noktasi (CLI), opsiyonel t-SNE cizimi.
-- `run.ipynb`: Colab odakli calisma not defteri.
-- `contvar/config.py`: tum temel ayarlar (`ProjectConfig`) ve ortam kurulumu.
-- `contvar/model.py`: `DeepProteinGAT` modeli.
-- `contvar/training.py`: egitim dongusu, degerlendirme, checkpoint kaydi.
-- `contvar/go_pretraining.py`: GO semantic similarity ile Phase-0 pretraining.
+- **Omurga**: iki katmanlı `GATv2Conv` tabanlı `DeepProteinGAT` (`contvar/model.py`), `global_mean_pool` ile graf düzeyi gömme.
+- **Kenarlar**: `ProjectConfig.edge_mode` ile `salad` (SALAD tarzı komşuluk) veya `graphein` (Graphein kenar fonksiyonları).
+- **Düğüm özellikleri**: amino asit one-hot ve isteğe bağlı diğer Graphein özellikleri; ESM-2 düğüm gömmeleri (`esm_dim`, `embeddings_variable.h5` vb.).
+- **Kayıp**: global triplet kaybı + mutasyon konumunda yerel kontrastif bileşen (eğitim döngüsünde birleştirilir).
+- **Eğitim boru hattı** (`contvar/training.py`):
+  1. **Phase 0**: GO anlamsal benzerlik ile ön eğitim (varsayılan `go_phase0_epochs` ile; DMS fazından önce çalışır).
+  2. **Phase 1**: müfredat ısınması — exhaustive triplet örnekleme + standart triplet kaybı.
+  3. **Phase 2**: akışkan yarı-zor negatif madencilik (`contvar/mining.py`) + yarı-zor triplet kaybı.
+- **İzleme**: Weights & Biases (`wandb`), isteğe bağlı t-SNE (`--visualize`).
 
-## Veri Seti Yapisi
-
-Kodun bekledigi varsayilan yapi:
+## Depo Yapısı
 
 ```text
 ContVAR/
-├── protein_triplets_data/
-│   ├── originals/
-│   │   ├── 1abc.cif
-│   │   └── 2xyz.cif
-│   ├── positives/
-│   │   ├── 1abc/
-│   │   │   ├── 1abc_var1.cif
-│   │   │   └── 1abc_var2.cif
-│   │   └── 2xyz/
-│   └── negatives/
-│       ├── 1abc/
-│       │   ├── 1abc_bad1.cif
-│       │   └── 1abc_bad2.cif
-│       └── 2xyz/
-└── embeddings_variable.h5
+├── train.py                 # Yerel CLI giriş noktası
+├── run.ipynb                # Colab odaklı not defteri
+├── setup.py                 # Paket kurulumu (bağımlılık listesi yok; aşağıdaki pip satırına bakın)
+├── contvar/
+│   ├── config.py            # ProjectConfig, setup_environment, Colab zip yolu
+│   ├── model.py             # DeepProteinGAT
+│   ├── training.py          # train_pipeline: Phase 0 → DMS müfredat eğitimi
+│   ├── go_pretraining.py    # Phase-0 GO ön eğitimi
+│   ├── go_identity_split.py # protein_to_split JSON yükleme ve triplet filtreleme
+│   ├── losses.py          # Standard / semi-hard triplet
+│   ├── mining.py            # streaming semi-hard madencilik
+│   ├── metrics.py           # AUC, mesafe metrikleri
+│   ├── edges.py             # SALAD tarzı kenar üretimi
+│   ├── utils.py             # ESM h5 yükleme
+│   ├── viz_tsne.py          # t-SNE görselleştirme
+│   ├── viz_graph.py         # örnek graf görselleştirme / wandb
+│   └── data/
+│       ├── mapper.py        # triplet yolları, train/val split JSON
+│       ├── dataset.py       # CIF → PyG (DMS), ExhaustiveTripletDataset
+│       ├── collate.py       # triplet batch birleştirme
+│       └── go_dataset.py    # Phase-0: yalnızca önceden üretilmiş .pt grafikleri
+├── graph_prebuilder/        # GO için toplu .pt graf üretimi (build_all_graphs.py, README)
+├── local_splits/            # Phase-0 protein bazlı train/val/test (ör. graphless çıkarılmış birleşik JSON)
+├── semantic_similarity/     # GO TSV’leri (MF/BP/CC filtreli benzerlik tabloları)
+├── protein_triplets_data/   # originals / positives / negatives CIF hiyerarşisi (DMS)
+└── *.md                     # PHASE0_GO_PRETRAINING.md, PHASE0_TASK_BRIEF.md, toplantı notları
 ```
-
-Notlar:
-- `originals` altinda dosyalar dogrudan bulunur.
-- `positives` ve `negatives` altinda her protein ID icin ayri klasor bulunur.
-- Mevcut kod akisi `.cif` dosyalari ile calisacak sekilde kurgulanmistir.
 
 ## Kurulum
 
-`setup.py` icinde bagimliliklar sabitlenmedigi icin paketleri manuel kurmaniz gerekir.
-
-Ornek kurulum:
+`setup.py` içinde `install_requires` tanımlı değildir; aşağıdaki paketleri manuel kurun:
 
 ```bash
 pip install -e .
-pip install torch torch-geometric graphein wandb biopython h5py scikit-learn matplotlib pandas networkx tqdm
+pip install torch torch-geometric graphein wandb biopython h5py scikit-learn matplotlib tqdm numpy networkx
 ```
 
-## Egitim
+Graphein genelde `pandas` gibi dolaylı bağımlılıkları çeker; eksik modül hatası alırsanız pip çıktısına göre tamamlayın.
 
-Yerel calistirma:
+## Veri Gereksinimleri
+
+### DMS triplet eğitimi
+
+- **`protein_triplets_data/`**: `originals/` altında doğrudan `.cif`; `positives/<protein_id>/` ve `negatives/<protein_id>/` alt klasörlerinde varyant yapıları.
+- **`embeddings_variable.h5`** (veya eşdeğer): ESM-2 düğüm gömmeleri; `train.py` ile `--embeddings` veya `setup_environment` varsayılanlarıyla verilir.
+
+### Phase-0 GO ön eğitimi
+
+Tam eğitim için Phase-0 verileri ve önceden üretilmiş graf dizini gereklidir (`go_prebuilt_graph_root`).
+
+- **`semantic_similarity/`** altında beklenen dosya adları (kodda sabit):
+
+  - `semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv`
+  - `semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv`
+  - `semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv`
+
+- **Önceden üretilmiş PyG graf dizini**: `GOSemanticTripletDataset` yalnızca `.pt` dosyalarından okur; CIF’ten anlık kurulum yoktur. Graf üretimi için `graph_prebuilder/build_all_graphs.py` ve klasördeki `README.md` kullanılır.
+- **Protein split**: `local_splits/phase0_protein_split_removed_graphless.json` — üst düzey `protein_to_split` anahtarı ile protein → `train` | `val` | `test` eşlemesi. Varsayılan yol `ProjectConfig.go_protein_split_json_path` içindedir.
+
+## Hızlı Başlangıç
+
+1. **Phase-0 grafları**: `graph_prebuilder/build_all_graphs.py` (veya aynı formatta `.pt` üreten süreç) ile ilgili proteinler için PyG graf dosyalarını hazırlayın.
+2. **Yapılandırma**: `contvar/config.py` içinde `go_prebuilt_graph_root` değerini bu graf dizinine ayarlayın (mutlak yol önerilir). `semantic_similarity` TSV’leri ve `local_splits` altındaki protein split JSON’u (`go_protein_split_json_path`) yerinde olmalıdır.
+3. **Çalıştırma**: DMS verisi ve ESM gömmeleriyle birlikte eğitim:
 
 ```bash
 python train.py --data-root protein_triplets_data --embeddings embeddings_variable.h5
 ```
 
-Sik kullanilan argumanlar:
-- `--force`: graph cache/split yeniden olusturma.
-- `--split-path <path>`: ozel split dosyasi.
-- `--wandb-key <key>`: WANDB API key.
-- `--visualize`: egitim sonunda validation embeddingleri icin t-SNE olusturur.
+Özet akış: önce Phase-0 (GO), ardından DMS triplet müfredatı (Phase 1 ve 2). `go_phase0_epochs` ve diğer Phase-0 hiperparametreleri `ProjectConfig` üzerinden ayarlanır.
 
-Checkpoint dosyalari varsayilan olarak calisma dizinine yazilir:
+## CLI (`train.py`)
+
+| Argüman | Açıklama |
+|--------|----------|
+| `--data-root` | `protein_triplets_data` kökü |
+| `--embeddings` | ESM-2 `h5` yolu |
+| `--force` | Graf önbelleğini / işlenmiş veriyi sıfırdan üret |
+| `--split-path` | Önceden kaydedilmiş split JSON (yeniden üretilebilirlik) |
+| `--wandb-key` | WandB API anahtarı (veya `WANDB_API_KEY` ortam değişkeni) |
+| `--visualize` | Eğitim sonunda validation gömmeleri için t-SNE |
+
+Checkpoint’ler çalışma dizinine yazılır:
+
 - `model_best_loss.pt`
 - `model_last.pt`
 
-## Model ve Egitim Akisi
+Triplet split dosyası `mapper` tarafından `data_root` altında saklanır (mantık: `contvar/data/mapper.py`).
 
-Ozet:
-- Omurga: GATv2 tabanli `DeepProteinGAT`.
-- Pooling: `global_mean_pool`.
-- Kayip: triplet + yerel contrastive bilesenler (konfige gore).
-- Mining: semi-hard negative mining.
-- Curriculum: egitim fazlara bolunebilir.
-- Opsiyonel: GO semantic similarity tabanli Phase-0 pretraining.
+## Phase-0: Ontoloji Örnekleme (GOAL2)
 
-Bu nedenle proje yalnizca "tek bir TripletMarginLoss adimi"ndan ibaret degildir; egitim boru hatti daha kapsamli bir sekilde tasarlanmistir.
-
-## Konfigurasyon
-
-Temel ayarlar `contvar/config.py` icindeki `ProjectConfig` ile yonetilir. Ornek alanlar:
-- graph edge modu (`salad` / `graphein`),
-- epoch, margin, batch size,
-- ESM embedding kullanimi (`esm_dim`),
-- GO Phase-0 dosya ve epoch ayarlari.
-
-## Phase-0 GO: kimlik bilincine sahip train/val/test
-
-GO TSV’lerindeki `sim_mf` / `sim_bp` / `sim_cc` **semantic** (anlamsal) benzerliktir; sekans kimligi (> %50) icin TSV’deki skorlar kullanilmaz. Train/val/test ayrimi **grup bazinda** yapilir (ornegin UniProt protein ID → UniRef50 cluster mapping’i ile): ayni gruptaki proteinler ayni bolmede kalir; `80 / 10 / 10` orani **grup sayisina** gore uygulanir.
-
-- Harici mapping: `protein_id` ve `group_id` (veya `uniref`, `cluster_id`) kolonlu tab-ayirali dosya; `go_cluster_map_path`.
-- Paylasilabilir split ciktisi: `go_split_json_path` (icinde `group_id -> train|val|test`). Diger ekip ayni JSON + ayni mapping ile es split’i alir. Bu dosyalari repoya commit etmeyin; Drive/zip/e-posta ile paylasin (`.gitignore` ornekleri: `local_splits/`, `*_phase0_go_split.json`).
-- Offline uretim: `python scripts/build_phase0_go_split.py --cluster-map ... --mf-tsv ... --bp-tsv ... --cc-tsv ... --output phase0_go_split.json` (Torch gerektirmez; `contvar.go_identity_split` kullanir).
-
-### Phase-0 split JSON’u tek seferde uretmek (onerilen)
-
-Proje kokunden (internet gerekir; buyuk TSV’lerde UniProt sorgulari uzun surebilir):
-
-```bash
-python scripts/generate_phase0_split_bundle.py
-```
-
-Bu komut sirasiyla:
-
-1. GO TSV’lerde gecen tum UniProt ID’leri icin UniProt REST API ile `UniRef50` cluster ID’lerini indirir ve `local_splits/protein_uniref50.tsv` yazar.
-2. `local_splits/phase0_go_split.json` dosyasini (grup -> train/val/test, 80/10/10) uretir.
-
-Zaten elinizde `protein_id` / `group_id` TSV’si varsa sadece JSON uretin:
-
-```bash
-python scripts/generate_phase0_split_bundle.py --skip-fetch --cluster-map /path/to/mapping.tsv --output-json /path/to/phase0_go_split.json
-```
-
-Sadece mapping indirmek icin:
-
-```bash
-python scripts/fetch_uniref50_cluster_map.py --output local_splits/protein_uniref50.tsv --mf-tsv semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv --bp-tsv semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv --cc-tsv semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv
-```
-
-Egitimde ornek:
-
-```python
-"go_split_mode": "identity_grouped",
-"go_cluster_map_path": r"C:\path\to\ContVAR\local_splits\protein_uniref50.tsv",
-"go_split_json_path": r"C:\path\to\ContVAR\local_splits\phase0_go_split.json",
-```
-
-Config anahtarlari: `go_split_mode` (`none` | `identity_grouped`), `go_split_seed`, `go_train_ratio`, `go_val_ratio`, `go_test_ratio`, `go_cluster_map_path`, `go_split_json_path`, `go_save_split_json_path`.
-
-## Phase-0 GO: ontology sampling orani (GOAL2)
-
-Phase-0'da MF/BP/CC dengesi loss katsayisi ile degil, sampling ile kontrol edilir. Varsayilan oran `mf=0.6`, `bp=0.2`, `cc=0.2` olarak gelir; ancak tamamen config'den degistirilebilir:
+Phase-0’da MF/BP/CC dengesi, kayıp ağırlığı yerine **örnekleme oranı** ile kontrol edilir. Varsayılanlar:
 
 ```python
 "go_sampling_enabled": True,
@@ -153,9 +129,21 @@ Phase-0'da MF/BP/CC dengesi loss katsayisi ile degil, sampling ile kontrol edili
 "go_log_sampling_stats": True,
 ```
 
-Boylece "hangi ontolojiden ne oranda sample aliyoruz?" sorusunun cevabi sabit kod yerine dogrudan konfigrasyonda tutulur; deneyden deneye kolayca override edilebilir.
+Tamamı `ProjectConfig` üzerinden değiştirilebilir.
+
+## Konfigürasyon
+
+Tüm temel hiperparametreler ve yollar `contvar/config.py` içindeki **`ProjectConfig`** sınıfında toplanır: kenar modu, epoch, margin, batch boyutları, müfredat (warmup epoch sayısı), Phase-1 erken durdurma penceresi, GO TSV dizini, `go_max_triplets_per_ontology`, `go_prebuilt_graph_root`, vb.
+
+`train_pipeline(..., config={...})` ile sözlük override (ör. WandB sweep) desteklenir; yerel `train.py` şu an bu sözlüğü CLI’dan geçirmez — deney parametreleri için `run.ipynb`, WandB veya `config.py` düzenlemesi kullanılır.
+
+## Ek Belgeler
+
+- **`PHASE0_GO_PRETRAINING.md`**: Phase-0 davranışı ve parametreler (bazı bölümler tarihsel olabilir; graf yükleme tarafında güncel kaynak kod `contvar/data/go_dataset.py` ve `go_pretraining.py`dır).
+- **`PHASE0_TASK_BRIEF.md`**, **`GO_DMS_TOPLANTI_NOTU_*.md`**: görev ve toplantı notları.
+- **`graph_prebuilder/README.md`**: toplu `.pt` üretimi ve Colab not defteri.
 
 ## Notlar
 
-- `run.ipynb` dosyasi Colab icin hazirlanmistir; yerel kullanimda `train.py` daha net bir baslangic noktasi sunar.
-- WandB anahtari gibi gizli bilgileri notebook veya repoya sabit yazmayin; ortam degiskeni kullanin (`WANDB_API_KEY`).
+- Gizli anahtarları repoya yazmayın; `WANDB_API_KEY` ortam değişkenini kullanın.
+- Colab için varsayılan Drive yolları `setup_environment` ve `run.ipynb` içinde tanımlıdır; yerelde `train.py` daha doğrudan bir başlangıçtır.

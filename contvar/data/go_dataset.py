@@ -27,6 +27,26 @@ class GOSemanticTripletDataset(Dataset):
 
     _global_pt_path_index: Dict[str, Dict[str, str]] = {}
 
+    @classmethod
+    def warm_prebuilt_index(cls, prebuilt_graph_root: str) -> int:
+        """Build the .pt path index for this root; return number of indexed protein prefixes."""
+        if not prebuilt_graph_root or not os.path.isdir(prebuilt_graph_root):
+            return 0
+        root_key = os.path.abspath(prebuilt_graph_root)
+        if root_key in cls._global_pt_path_index:
+            return len(cls._global_pt_path_index[root_key])
+        index: Dict[str, str] = {}
+        for root, _, files in os.walk(prebuilt_graph_root):
+            for fname in files:
+                if not fname.lower().endswith(".pt"):
+                    continue
+                base = os.path.splitext(fname)[0].lower()
+                prefix = base.split("_", 1)[0]
+                if prefix:
+                    index[prefix] = os.path.join(root, fname)
+        cls._global_pt_path_index[root_key] = index
+        return len(index)
+
     def __init__(
         self,
         tsv_path: str,

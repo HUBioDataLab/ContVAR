@@ -235,6 +235,14 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         )
     print(f"[Phase0] Prebuilt GO graphs: {prebuilt_graph_root}")
 
+    n_prebuilt = GOSemanticTripletDataset.warm_prebuilt_index(prebuilt_graph_root)
+    if n_prebuilt == 0:
+        print(
+            "[Phase0] No .pt files indexed under prebuilt_graph_root (empty folder or Drive I/O issue). "
+            "Skipping Phase 0 — no TSV parsing."
+        )
+        return
+
     # Resolve TSV paths
     tsv_dir = cfg.go_tsv_dir
     mf_tsv = os.path.join(
