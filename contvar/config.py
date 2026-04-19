@@ -108,23 +108,12 @@ class ProjectConfig:
         # Phase 0 loads protein graphs only from this directory (PyG Data .pt files).
         # Required when go_phase0_epochs > 0.
         self.go_prebuilt_graph_root = None
-        # If True, ignore identity-grouped split and create train/val/test directly
-        # from prebuilt protein IDs using go_train_ratio/go_val_ratio/go_test_ratio.
-        self.go_random_split_from_prebuilt = False
-
-        # Phase-0: identity-aware train/val/test split (sequence groups, e.g. UniRef50)
-        # "none" = use all triplets (legacy). "identity_grouped" = filter by cluster split.
-        self.go_split_mode = "none"
+        # Merged bundle: protein_id -> train|val|test (UniRef pipeline + optional graphless drop).
+        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self.go_protein_split_json_path = os.path.join(
+            _repo_root, "local_splits", "phase0_protein_split_removed_graphless.json"
+        )
         self.go_split_seed = 42
-        self.go_train_ratio = 0.8
-        self.go_val_ratio = 0.1
-        self.go_test_ratio = 0.1
-        # Tab-separated mapping: protein_id -> group_id (e.g. UniRef50 cluster).
-        self.go_cluster_map_path = None
-        # JSON with group_id -> "train"|"val"|"test"; share this file across teams.
-        self.go_split_json_path = None
-        # If set and go_split_json_path is missing, write a new split here after assignment.
-        self.go_save_split_json_path = None
 
     @property
     def input_dim(self):

@@ -11,7 +11,7 @@ from torch_geometric.data import Batch
 
 from contvar.config import ProjectConfig
 from contvar.data.go_dataset import GOSemanticTripletDataset
-from contvar.go_identity_split import resolve_phase0_split
+from contvar.go_identity_split import load_protein_to_split_json
 
 # Ontology order matches meeting pseudocode (MF → BP → CC).
 _GO_ONTOLOGY_ORDER: Tuple[str, ...] = ("mf", "bp", "cc")
@@ -91,50 +91,6 @@ def _weighted_pick_ontology(
 def _triplet_batch_size(batch_triplet: Tuple[Batch, Batch, Batch]) -> int:
     ba, _, _ = batch_triplet
     return int(getattr(ba, "num_graphs", 0)) or 0
-
-
-def _collect_prebuilt_protein_ids(prebuilt_graph_root: str) -> List[str]:
-    ids = set()
-    if not prebuilt_graph_root or not os.path.exists(prebuilt_graph_root):
-        return []
-    for root, _, files in os.walk(prebuilt_graph_root):
-        for fname in files:
-            if not fname.lower().endswith(".pt"):
-                continue
-            base = os.path.splitext(fname)[0].lower()
-            pid = base.split("_", 1)[0]
-            if pid:
-                ids.add(pid)
-    return sorted(ids)
-
-
-def _build_random_prebuilt_split(cfg: ProjectConfig, protein_ids: List[str]) -> Dict[str, str]:
-    rng = random.Random(int(getattr(cfg, "go_split_seed", 42)))
-    ids = list(protein_ids)
-    rng.shuffle(ids)
-
-    rt = float(getattr(cfg, "go_train_ratio", 0.8))
-    rv = float(getattr(cfg, "go_val_ratio", 0.1))
-    rte = float(getattr(cfg, "go_test_ratio", 0.1))
-    total = rt + rv + rte
-    if total <= 0:
-        rt, rv, rte = 0.8, 0.1, 0.1
-        total = 1.0
-    rt, rv, rte = rt / total, rv / total, rte / total
-
-    n = len(ids)
-    n_train = int(n * rt)
-    n_val = int(n * rv)
-    n_test = n - n_train - n_val
-
-    split_map: Dict[str, str] = {}
-    for pid in ids[:n_train]:
-        split_map[pid] = "train"
-    for pid in ids[n_train:n_train + n_val]:
-        split_map[pid] = "val"
-    for pid in ids[n_train + n_val:n_train + n_val + n_test]:
-        split_map[pid] = "test"
-    return split_map
 
 
 def _compute_go_phase0_loss(
@@ -291,71 +247,51 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         tsv_dir, "semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv"
     )
 
-    protein_to_split: Optional[dict] = None
-    if bool(getattr(cfg, "go_random_split_from_prebuilt", False)):
-        prebuilt_ids = _collect_prebuilt_protein_ids(prebuilt_graph_root)
-        protein_to_split = _build_random_prebuilt_split(cfg, prebuilt_ids)
-        n_train = sum(1 for s in protein_to_split.values() if s == "train")
-        n_val = sum(1 for s in protein_to_split.values() if s == "val")
-        n_test = sum(1 for s in protein_to_split.values() if s == "test")
-        print(
-            f"[Phase0] Prebuilt random split from proteins: total={len(protein_to_split):,} "
-            f"| train={n_train:,} val={n_val:,} test={n_test:,}"
-        )
-    elif getattr(cfg, "go_split_mode", "none") == "identity_grouped":
-        protein_to_split, _ = resolve_phase0_split(cfg, mf_tsv, bp_tsv, cc_tsv)
+    split_json = getattr(cfg, "go_protein_split_json_path", None)
+    if not split_json:
+        raise ValueError("Phase 0 requires go_protein_split_json_path (protein_to_split JSON).")
+    protein_to_split = load_protein_to_split_json(split_json)
+    n_train = sum(1 for s in protein_to_split.values() if s == "train")
+    n_val = sum(1 for s in protein_to_split.values() if s == "val")
+    n_test = sum(1 for s in protein_to_split.values() if s == "test")
+    print(
+        f"[Phase0] protein_to_split from {split_json}: "
+        f"total={len(protein_to_split):,} | train={n_train:,} val={n_val:,} test={n_test:,}"
+    )
 
-    def make_loaders_for_split(split_name: Optional[str], shuffle: bool):
+    def make_loaders_for_split(split_name: str, shuffle: bool) -> Dict[str, DataLoader]:
         out: Dict[str, DataLoader] = {}
         for ont, path in [("mf", mf_tsv), ("bp", bp_tsv), ("cc", cc_tsv)]:
             if not os.path.exists(path):
                 continue
-            ps = split_name if protein_to_split else None
-            pt = protein_to_split if protein_to_split else None
             loader = _build_go_loader(
                 tsv_path=path,
                 ontology=ont,
                 cfg=cfg,
                 prebuilt_graph_root=prebuilt_graph_root,
                 shuffle=shuffle,
-                phase0_split=ps,
-                protein_to_split=pt,
+                phase0_split=split_name,
+                protein_to_split=protein_to_split,
             )
             if loader is not None:
                 out[ont] = loader
         return out
 
-    if protein_to_split:
-        train_loaders = make_loaders_for_split("train", shuffle=True)
-        val_loaders = make_loaders_for_split("val", shuffle=False)
-        test_loaders = make_loaders_for_split("test", shuffle=False)
-        loaders = train_loaders
-        for split_label, ld in (
-            ("train", train_loaders),
-            ("val", val_loaders),
-            ("test", test_loaders),
-        ):
-            for ont in _GO_ONTOLOGY_ORDER:
-                if ont not in ld:
-                    continue
-                n = len(ld[ont].dataset)
-                print(f"[Phase0] {split_label} triplets [{ont}]: {n:,}")
-                wandb.log({f"phase0/split/{split_label}_triplets_{ont}": n})
-    else:
-        loaders = {}
-        for ont, path in [("mf", mf_tsv), ("bp", bp_tsv), ("cc", cc_tsv)]:
-            if os.path.exists(path):
-                loader = _build_go_loader(
-                    tsv_path=path,
-                    ontology=ont,
-                    cfg=cfg,
-                    prebuilt_graph_root=prebuilt_graph_root,
-                    shuffle=True,
-                )
-                if loader is not None:
-                    loaders[ont] = loader
-        val_loaders = {}
-        test_loaders = {}
+    train_loaders = make_loaders_for_split("train", shuffle=True)
+    val_loaders = make_loaders_for_split("val", shuffle=False)
+    test_loaders = make_loaders_for_split("test", shuffle=False)
+    loaders = train_loaders
+    for split_label, ld in (
+        ("train", train_loaders),
+        ("val", val_loaders),
+        ("test", test_loaders),
+    ):
+        for ont in _GO_ONTOLOGY_ORDER:
+            if ont not in ld:
+                continue
+            n = len(ld[ont].dataset)
+            print(f"[Phase0] {split_label} triplets [{ont}]: {n:,}")
+            wandb.log({f"phase0/split/{split_label}_triplets_{ont}": n})
 
     if not loaders:
         print("No GO loaders constructed for phase 0, skipping.")
