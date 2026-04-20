@@ -37,7 +37,7 @@ ContVAR/
    |- semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv
    |- semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv
    `- semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv
-`- optional: a directory of prebuilt GO `.pt` graphs
+`- a directory of prebuilt GO `.pt` graphs
 
 
 ## Starter CLI
