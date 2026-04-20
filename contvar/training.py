@@ -21,6 +21,16 @@ from contvar.utils import load_all_embeddings
 from contvar.go_pretraining import run_go_pretraining
 
 
+def _load_model_checkpoint(model, checkpoint_path, device):
+    """Load either a raw state_dict or a checkpoint dict into the model."""
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+    model.load_state_dict(state_dict)
+
+
 def evaluate(model, loader, criterion, device, margin=0.3):
     """Evaluate model on a given dataloader with both global and local loss"""
     model.eval()
@@ -166,6 +176,16 @@ def train_pipeline(config=None, force=False, data_root=None,
         heads=cfg.heads,
         edge_dim=cfg.edge_attr_dim
     ).to(device)
+
+    init_checkpoint_path = getattr(cfg, "go_phase0_init_checkpoint_path", None)
+    if init_checkpoint_path:
+        if not os.path.isfile(init_checkpoint_path):
+            raise FileNotFoundError(
+                f"GO phase-0 init checkpoint not found: {init_checkpoint_path}"
+            )
+        _load_model_checkpoint(model, init_checkpoint_path, device)
+        print(f"[Phase0] Initialized model from checkpoint: {init_checkpoint_path}")
+        run.summary["phase0_init_checkpoint_path"] = init_checkpoint_path
 
     optimizer = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 

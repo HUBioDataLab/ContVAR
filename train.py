@@ -14,6 +14,10 @@ def main():
                         help="Path to ESM2 embeddings h5 file")
     parser.add_argument("--force", action="store_true",
                         help="Reprocess all protein graphs from scratch")
+    parser.add_argument("--go-phase0-load", type=str, default=None,
+                        help="Initialize from a saved GO phase-0 checkpoint")
+    parser.add_argument("--go-phase0-epochs", type=int, default=None,
+                        help="Override the number of GO phase-0 epochs")
     parser.add_argument("--wandb-key", type=str, default=None,
                         help="WandB API key (or set WANDB_API_KEY env var)")
     parser.add_argument("--visualize", action="store_true",
@@ -28,7 +32,14 @@ def main():
     if args.wandb_key:
         wandb.login(key=args.wandb_key)
 
+    config_overrides = {}
+    if args.go_phase0_load:
+        config_overrides["go_phase0_init_checkpoint_path"] = args.go_phase0_load
+    if args.go_phase0_epochs is not None:
+        config_overrides["go_phase0_epochs"] = args.go_phase0_epochs
+
     model, mapper, processed_dir = train_pipeline(
+        config=config_overrides or None,
         force=args.force,
         data_root=env['data_root'],
         embeddings_path=env['embeddings_path'],

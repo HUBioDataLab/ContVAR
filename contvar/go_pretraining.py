@@ -23,6 +23,15 @@ def _triplet_loss(anchor, positive, negative, margin: float):
     return F.relu(d_pos - d_neg + margin).mean(), d_pos, d_neg
 
 
+def _save_model_checkpoint(model, checkpoint_path: Optional[str]):
+    """Persist the current model weights if a checkpoint path is configured."""
+    if not checkpoint_path:
+        return
+    checkpoint_dir = os.path.dirname(os.path.abspath(checkpoint_path))
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    torch.save(model.state_dict(), checkpoint_path)
+
+
 def _infinite_batches(loader: DataLoader):
     """Yield batches forever; each pass over the loader gets a fresh shuffle."""
     while True:
@@ -307,6 +316,10 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
 
     # Stable order for averaging (only ontologies that have a loader).
     active_ontologies = [o for o in _GO_ONTOLOGY_ORDER if o in loaders]
+    best_checkpoint_path = getattr(cfg, "go_phase0_best_model_path", None)
+    last_checkpoint_path = getattr(cfg, "go_phase0_last_model_path", None)
+    best_metric = float("inf")
+    best_epoch = None
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.go_lr, weight_decay=cfg.weight_decay
@@ -324,6 +337,10 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
             f"{ont}:{ratio_map.get(ont, 0.0):.2f}" for ont in active_ontologies
         )
         print(f"[Phase0] Sampling mode enabled | ratios={ratio_txt}")
+    if best_checkpoint_path:
+        print(f"[Phase0] Best checkpoint path: {best_checkpoint_path}")
+    if last_checkpoint_path:
+        print(f"[Phase0] Last checkpoint path: {last_checkpoint_path}")
 
     for epoch in range(cfg.go_phase0_epochs):
         model.train()
@@ -433,6 +450,7 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
             f"Avg Loss: {avg_loss:.4f}"
         )
 
+        v_loss = None
         if protein_to_split and val_loaders:
             v_loss = _mean_eval_loss_for_loaders(
                 model, val_loaders, device, cfg.go_margin, active_ontologies
@@ -452,3 +470,32 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                     {"phase0/test/mean_loss": t_loss, "phase0/epoch": epoch + 1}
                 )
                 print(f"[Phase0] Test mean loss: {t_loss:.4f}")
+
+        selection_metric = v_loss if v_loss is not None else avg_loss
+        selection_metric_name = "val_mean_loss" if v_loss is not None else "train_loss"
+        if selection_metric < best_metric:
+            best_metric = selection_metric
+            best_epoch = epoch + 1
+            _save_model_checkpoint(model, best_checkpoint_path)
+            if best_checkpoint_path:
+                print(
+                    f"[Phase0] Saved best checkpoint ({selection_metric_name}="
+                    f"{selection_metric:.4f}) to {best_checkpoint_path}"
+                )
+            else:
+                print(
+                    f"[Phase0] Updated best {selection_metric_name}: "
+                    f"{selection_metric:.4f}"
+                )
+
+        wandb.log(
+            {
+                "phase0/best_epoch_so_far": best_epoch if best_epoch is not None else 0,
+                "phase0/best_metric_so_far": best_metric,
+                "phase0/selection_metric": selection_metric,
+            }
+        )
+
+    _save_model_checkpoint(model, last_checkpoint_path)
+    if last_checkpoint_path:
+        print(f"[Phase0] Saved last checkpoint to {last_checkpoint_path}")

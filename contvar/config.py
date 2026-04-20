@@ -16,6 +16,8 @@ class ProjectConfig:
     """Centralized configuration for features, edges, and hyperparameters"""
 
     def __init__(self):
+        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
         # Node Features
         self.use_embedding = True
         self.esm_dim = 1280
@@ -72,12 +74,21 @@ class ProjectConfig:
         # Paths for GO pretraining
         # Directory containing semantic similarity TSVs
         self.go_tsv_dir = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "semantic_similarity"
+            _repo_root, "semantic_similarity"
         )
         # Phase 0 loads protein graphs only from this directory (PyG Data .pt files).
         # Required when go_phase0_epochs > 0.
         self.go_prebuilt_graph_root = None
-        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        # Optional initialization checkpoint for reusing saved GO-pretrained weights.
+        # If set, the model is loaded from this path before any phase-0 training.
+        # To skip recomputing phase 0 entirely, combine this with go_phase0_epochs = 0.
+        self.go_phase0_init_checkpoint_path = None
+        self.go_phase0_best_model_path = os.path.join(
+            _repo_root, "model_phase0_best_loss.pt"
+        )
+        self.go_phase0_last_model_path = os.path.join(
+            _repo_root, "model_phase0_last.pt"
+        )
         self.dms_protein_split_json_path = os.path.join(
             _repo_root, "local_splits", "dms_protein_split.json"
         )
