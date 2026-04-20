@@ -1,6 +1,5 @@
 import os
 import time
-from collections import deque
 
 import numpy as np
 import torch
@@ -11,7 +10,7 @@ from tqdm import tqdm
 import wandb
 
 from contvar.config import ProjectConfig, ensure_dms_triplets_unzipped
-from contvar.data.mapper import TripletDataPathMapper
+from contvar.data.mapper import TripletDataPathMapper, DmsProteinSplitError
 from contvar.data.dataset import TripletProteinGraphDataset, ExhaustiveTripletDataset
 from contvar.data.collate import triplet_collate
 from contvar.model import DeepProteinGAT
@@ -103,16 +102,14 @@ def evaluate(model, loader, criterion, device, margin=0.3):
     return aggregated
 
 
-def train_pipeline(config=None, force=False, split_path=None,
-                   data_root=None, embeddings_path=None, device=None,
-                   data_zip=None):
+def train_pipeline(config=None, force=False, data_root=None,
+                   embeddings_path=None, device=None, data_zip=None):
     """
-    Main training pipeline with CURRICULUM LEARNING support.
+    Main training pipeline.
 
     Args:
         config: dict of config overrides (e.g. from wandb sweep)
         force: If True, reprocess all protein graphs from scratch
-        split_path: Path to existing split JSON for reproducibility
         data_root: Path to protein_triplets_data directory
         embeddings_path: Path to ESM2 embeddings h5 file
         device: torch device (auto-detected if None)
@@ -149,16 +146,11 @@ def train_pipeline(config=None, force=False, split_path=None,
             data_zip = env.get("data_zip")
 
     print(f"Training with LR: {cfg.lr}, Hidden: {cfg.hidden_dim}, Heads: {cfg.heads}")
-    print(f"Curriculum Learning: {cfg.curriculum_warmup_epochs} warm-up epochs with exhaustive sampling")
     print(f"Streaming Mining: chunk_size={cfg.mining_chunk_size}, max_negatives={cfg.max_negatives}")
     print(f"Gradient Accumulation: {cfg.grad_accumulation_steps} steps (effective batch = {cfg.mining_batch_size * cfg.grad_accumulation_steps})")
+    print(f"Eval Batch Size: {cfg.eval_batch_size}")
     print(f"Local Loss: Contrastive (attract good / repel bad at mutation position)")
-    if cfg.phase1_early_stop:
-        print(f"Phase 1 Early Stopping: ON (threshold={cfg.phase1_es_threshold}, "
-              f"window={cfg.phase1_es_window}, patience={cfg.phase1_es_patience}, "
-              f"min_batches={cfg.phase1_es_min_batches})")
-    else:
-        print(f"Phase 1 Early Stopping: OFF")
+    print(f"DMS protein split: {cfg.dms_protein_split_json_path}")
 
     shared_embeddings = None
     if force and embeddings_path:
@@ -186,22 +178,28 @@ def train_pipeline(config=None, force=False, split_path=None,
     if getattr(cfg, "go_phase0_epochs", 0) > 0:
         run_go_pretraining(model, cfg, device)
 
-    # DMS triplets (zip on Colab if needed), then Phase 1 / Phase 2 curriculum.
-    print("\n=== DMS data: unzip if needed, then triplet split (Phase 1+) ===")
+    # DMS triplets (zip on Colab if needed), then stage-2 training on fixed splits.
+    print("\n=== DMS data: unzip if needed, then load fixed protein split ===")
     ensure_dms_triplets_unzipped(data_root, data_zip)
-    mapper = TripletDataPathMapper(
-        data_root, val_pos=2, val_neg=2, seed=42, split_path=split_path
-    )
+    try:
+        mapper = TripletDataPathMapper(
+            data_root,
+            split_json_path=getattr(cfg, "dms_protein_split_json_path", None),
+        )
+    except DmsProteinSplitError as exc:
+        print(f"\nDMS split configuration error: {exc}")
+        wandb.finish()
+        return None, None, None
+
     if not mapper.triplets:
         print("No data found!")
         wandb.finish()
-        return
-    mapper.save_split()
+        return None, None, None
 
     # =========================================================================
-    # CREATE DATASETS FOR CURRICULUM PHASES
+    # CREATE DATASETS
     # =========================================================================
-    print("\n=== Phase 1 Setup: Exhaustive Sampling ===")
+    print("\n=== Stage-2 Setup: Streaming Train + Exhaustive Val/Test ===")
 
     main_train_dataset = TripletProteinGraphDataset(
         mapper, root=data_root, config=cfg, split='train',
@@ -209,78 +207,58 @@ def train_pipeline(config=None, force=False, split_path=None,
         force=force, preloaded_embeddings=shared_embeddings
     )
 
-    exhaustive_train_dataset = ExhaustiveTripletDataset(
-        mapper, root=data_root, config=cfg, split='train',
-        preloaded_embeddings=shared_embeddings
-    )
-    exhaustive_val_dataset = ExhaustiveTripletDataset(
+    val_dataset = ExhaustiveTripletDataset(
         mapper, root=data_root, config=cfg, split='val',
         preloaded_embeddings=shared_embeddings
     )
-
-    print("\n=== Phase 2 Setup: Streaming Semi-Hard Mining ===")
+    test_dataset = ExhaustiveTripletDataset(
+        mapper, root=data_root, config=cfg, split='test',
+        preloaded_embeddings=shared_embeddings
+    )
 
     # =========================================================================
     # CREATE DATALOADERS
     # =========================================================================
-    phase1_train_loader = DataLoader(
-        exhaustive_train_dataset,
-        batch_size=cfg.warmup_batch_size,
-        shuffle=True,
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg.eval_batch_size,
+        shuffle=False,
         collate_fn=triplet_collate,
         num_workers=getattr(cfg, "num_workers", 0)
     )
-    phase1_val_loader = DataLoader(
-        exhaustive_val_dataset,
-        batch_size=cfg.warmup_batch_size,
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=cfg.eval_batch_size,
         shuffle=False,
         collate_fn=triplet_collate,
         num_workers=getattr(cfg, "num_workers", 0)
     )
 
     processed_dir = os.path.join(data_root, "processed")
-    num_phase2_train_batches = (len(main_train_dataset.triplets) + cfg.mining_batch_size - 1) // cfg.mining_batch_size
+    num_train_batches = (
+        len(main_train_dataset.triplets) + cfg.mining_batch_size - 1
+    ) // cfg.mining_batch_size
 
     print(f"\nDataset sizes:")
-    print(f"  Phase 1 Train (exhaustive): {len(exhaustive_train_dataset):,} triplets")
-    print(f"  Val (exhaustive, both phases): {len(exhaustive_val_dataset):,} triplets")
-    print(f"  Phase 2 Train (streaming mining): {len(main_train_dataset.triplets)} families x train negatives")
+    print(f"  Train families: {len(main_train_dataset.triplets):,}")
+    print(f"  Val triplets (exhaustive): {len(val_dataset):,}")
+    print(f"  Test triplets (exhaustive): {len(test_dataset):,}")
 
     print("\n" + "="*60)
-    print("STARTING CURRICULUM LEARNING")
+    print("STARTING STAGE-2 DMS TRAINING")
     print("="*60)
 
     best_val_loss = float('inf')
 
     for epoch in range(cfg.epochs):
-        # =====================================================================
-        # PHASE SELECTION
-        # =====================================================================
-        is_warmup_phase = epoch < cfg.curriculum_warmup_epochs
-
-        if is_warmup_phase:
-            train_loader = phase1_train_loader
-            criterion = standard_criterion
-            phase_name = "WARMUP (Exhaustive + Standard Loss)"
-            current_batch_size = cfg.warmup_batch_size
-
-            if epoch > 0:
-                exhaustive_train_dataset.reshuffle()
-        else:
-            train_loader = streaming_mining_batch_iterator(
-                model, main_train_dataset.triplets, processed_dir, device, cfg
-            )
-            criterion = semihard_criterion
-            phase_name = "MINING (Streaming Semi-Hard)"
-            current_batch_size = cfg.mining_batch_size
-
-        if is_warmup_phase:
-            num_train_batches = len(train_loader)
-        else:
-            num_train_batches = num_phase2_train_batches
+        train_loader = streaming_mining_batch_iterator(
+            model, main_train_dataset.triplets, processed_dir, device, cfg
+        )
+        criterion = semihard_criterion
+        current_batch_size = cfg.mining_batch_size
 
         print(f"\n{'='*60}")
-        print(f"Epoch {epoch+1}/{cfg.epochs} | Phase: {phase_name}")
+        print(f"Epoch {epoch+1}/{cfg.epochs} | Stage-2 Streaming Semi-Hard Mining")
         print(f"Batch size: {current_batch_size} | Train batches: ~{num_train_batches}")
         print(f"{'='*60}")
 
@@ -304,12 +282,7 @@ def train_pipeline(config=None, force=False, split_path=None,
         epoch_local_semi_hard_total = 0
         epoch_local_hard_total = 0
 
-        phase1_early_stopped = False
-        if is_warmup_phase and cfg.phase1_early_stop:
-            es_loss_buffer = deque(maxlen=cfg.phase1_es_window)
-            es_patience_counter = 0
-
-        accum_steps = cfg.grad_accumulation_steps if not is_warmup_phase else 1
+        accum_steps = cfg.grad_accumulation_steps
 
         optimizer.zero_grad()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False, total=num_train_batches)
@@ -318,11 +291,7 @@ def train_pipeline(config=None, force=False, split_path=None,
             if batch is None:
                 continue
 
-            if not is_warmup_phase:
-                ba, bp, bn, neg_counts, mut_pos_positive, mut_pos_negatives, streaming_info = batch
-            else:
-                ba, bp, bn, neg_counts, mut_pos_positive, mut_pos_negatives = batch
-                streaming_info = None
+            ba, bp, bn, neg_counts, mut_pos_positive, mut_pos_negatives, streaming_info = batch
 
             if ba.num_graphs < 2:
                 continue
@@ -412,7 +381,6 @@ def train_pipeline(config=None, force=False, split_path=None,
                 "train/avg_pos_dist": dist_pos.mean().item(),
                 "train/avg_neg_dist": neg_dist.mean().item(),
                 "train/dist_margin": (neg_dist.mean() - dist_pos.mean()).item(),
-                "train/phase": 1 if is_warmup_phase else 2,
                 "train/batch_size": current_batch_size,
                 "train/avg_pos_dist_l": d_pos_l.mean().item(),
                 "train/avg_neg_dist_l": d_neg_l.mean().item(),
@@ -465,31 +433,7 @@ def train_pipeline(config=None, force=False, split_path=None,
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
                 'auc': f'{batch_metrics["AUROC"]:.3f}',
-                'phase': 1 if is_warmup_phase else 2
             })
-
-            # =================================================================
-            # PHASE 1 INTRA-EPOCH EARLY STOPPING CHECK
-            # =================================================================
-            if is_warmup_phase and cfg.phase1_early_stop:
-                es_loss_buffer.append(loss.item())
-
-                if (valid_batches >= cfg.phase1_es_min_batches
-                        and len(es_loss_buffer) == cfg.phase1_es_window):
-                    window_mean = sum(es_loss_buffer) / len(es_loss_buffer)
-
-                    if window_mean < cfg.phase1_es_threshold:
-                        es_patience_counter += 1
-                    else:
-                        es_patience_counter = 0
-
-                    if es_patience_counter >= cfg.phase1_es_patience:
-                        phase1_early_stopped = True
-                        print(f"\n  >>> Phase 1 early stop triggered at batch {valid_batches}/{num_train_batches} "
-                              f"(window_mean_loss={window_mean:.6f} < {cfg.phase1_es_threshold} "
-                              f"for {cfg.phase1_es_patience} consecutive windows)")
-                        pbar.close()
-                        break
 
         # Flush remaining accumulated gradients at end of epoch
         if valid_batches % accum_steps != 0:
@@ -511,10 +455,11 @@ def train_pipeline(config=None, force=False, split_path=None,
         # =====================================================================
         # VALIDATION
         # =====================================================================
-        val_metrics = evaluate(model, phase1_val_loader, val_criterion, device, margin=cfg.margin)
+        val_metrics = evaluate(model, val_loader, val_criterion, device, margin=cfg.margin)
+        test_metrics = evaluate(model, test_loader, val_criterion, device, margin=cfg.margin)
 
         embedding_stats = compute_embedding_stats(
-            model, phase1_val_loader, device, val_criterion, max_batches=20
+            model, val_loader, device, val_criterion, max_batches=20
         )
         log_dict = {
             "train/epoch_loss": avg_train_loss,
@@ -532,6 +477,15 @@ def train_pipeline(config=None, force=False, split_path=None,
             "val/R@1": val_metrics.get("R@1", 0),
             "val/Alignment": val_metrics.get("Alignment", 0),
             "val/Uniformity": val_metrics.get("Uniformity", 0),
+            "test/loss": test_metrics.get("loss", 0),
+            "test/loss_g": test_metrics.get("loss_g", 0),
+            "test/loss_l": test_metrics.get("loss_l", 0),
+            "test/AUROC": test_metrics.get("AUROC", 0),
+            "test/Simple_Acc": test_metrics.get("Simple_Acc", 0),
+            "test/MRR": test_metrics.get("MRR", 0),
+            "test/R@1": test_metrics.get("R@1", 0),
+            "test/Alignment": test_metrics.get("Alignment", 0),
+            "test/Uniformity": test_metrics.get("Uniformity", 0),
             "train/epoch_duration_sec": epoch_duration_sec,
             "train/epoch_overfit_gap": val_metrics.get("loss", 0) - avg_train_loss,
             "train/epoch_num_batches": valid_batches,
@@ -565,7 +519,7 @@ def train_pipeline(config=None, force=False, split_path=None,
             artifact = wandb.Artifact(
                 name=f"ContVAR-Best-Model-{wandb.run.id}",
                 type="model",
-                description=f"Best model at epoch {epoch+1} (Phase {'1-Warmup' if is_warmup_phase else '2-Mining'}) with val_loss {best_val_loss:.4f}"
+                description=f"Best model at epoch {epoch+1} with val_loss {best_val_loss:.4f}"
             )
             artifact.add_file(model_name)
             wandb.log_artifact(artifact)
@@ -574,14 +528,14 @@ def train_pipeline(config=None, force=False, split_path=None,
 
         wandb.log(log_dict)
 
-        phase_str = "P1-Warmup" if is_warmup_phase else "P2-Mining"
         saved_str = "(Saved)" if log_dict.get("best_model_saved") else ""
-        es_str = " [EARLY STOPPED]" if phase1_early_stopped else ""
-        print(f"[{phase_str}] Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | "
+        print(f"[Stage2] Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | "
               f"Val Loss: {val_metrics.get('loss', 0):.4f} | "
+              f"Test Loss: {test_metrics.get('loss', 0):.4f} | "
               f"Val AUROC: {val_metrics.get('AUROC', 0):.4f} | "
+              f"Test AUROC: {test_metrics.get('AUROC', 0):.4f} | "
               f"Local[E:{epoch_local_easy_total} S:{epoch_local_semi_hard_total} H:{epoch_local_hard_total}] "
-              f"{saved_str}{es_str}")
+              f"{saved_str}")
 
     # Save last epoch model
     torch.save(model.state_dict(), "model_last.pt")

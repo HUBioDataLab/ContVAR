@@ -1,7 +1,7 @@
 """CLI entry point for ContVAR training."""
 import argparse
 import wandb
-from contvar.config import ProjectConfig, setup_environment
+from contvar.config import setup_environment
 from contvar.training import train_pipeline
 from contvar.viz_tsne import visualize_tsne
 
@@ -14,8 +14,6 @@ def main():
                         help="Path to ESM2 embeddings h5 file")
     parser.add_argument("--force", action="store_true",
                         help="Reprocess all protein graphs from scratch")
-    parser.add_argument("--split-path", type=str, default=None,
-                        help="Path to existing split JSON for reproducibility")
     parser.add_argument("--wandb-key", type=str, default=None,
                         help="WandB API key (or set WANDB_API_KEY env var)")
     parser.add_argument("--visualize", action="store_true",
@@ -32,7 +30,6 @@ def main():
 
     model, mapper, processed_dir = train_pipeline(
         force=args.force,
-        split_path=args.split_path,
         data_root=env['data_root'],
         embeddings_path=env['embeddings_path'],
         device=env['device'],
@@ -42,8 +39,9 @@ def main():
     if args.visualize and model is not None:
         visualize_tsne(
             model=model,
-            splits=["val"],
-            data_root=env['data_root'],
+            mapper=mapper,
+            processed_dir=processed_dir,
+            split="val",
             device=env['device'],
         )
 

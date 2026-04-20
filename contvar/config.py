@@ -61,7 +61,6 @@ class ProjectConfig:
         self.heads = 4
         self.lr = 1e-4
         self.weight_decay = 0.01
-        self.batch_size = 8
         self.epochs = 200
         self.margin = 0.3
 
@@ -72,19 +71,11 @@ class ProjectConfig:
         # Streaming Negative Mining Configuration
         self.mining_chunk_size = 10
 
-        # Curriculum Learning Configuration
-        self.curriculum_warmup_epochs = 0
-        self.warmup_batch_size = 32
+        # Stage-2 DMS training configuration
         self.mining_batch_size = 8
+        self.eval_batch_size = 32
         self.grad_accumulation_steps = 4
         self.num_workers = 8
-
-        # Phase 1 Intra-Epoch Early Stopping
-        self.phase1_early_stop = True
-        self.phase1_es_threshold = 0.01
-        self.phase1_es_window = 20
-        self.phase1_es_patience = 3
-        self.phase1_es_min_batches = 50
 
         # Phase 0: GO semantic similarity pretraining
         self.go_phase0_epochs = 2  # set >0 to enable (override in Colab if needed)
@@ -108,8 +99,11 @@ class ProjectConfig:
         # Phase 0 loads protein graphs only from this directory (PyG Data .pt files).
         # Required when go_phase0_epochs > 0.
         self.go_prebuilt_graph_root = None
-        # Merged bundle: protein_id -> train|val|test (UniRef pipeline + optional graphless drop).
         _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self.dms_protein_split_json_path = os.path.join(
+            _repo_root, "local_splits", "dms_protein_split.json"
+        )
+        # Merged bundle: protein_id -> train|val|test (UniRef pipeline + optional graphless drop).
         self.go_protein_split_json_path = os.path.join(
             _repo_root, "local_splits", "phase0_protein_split_removed_graphless.json"
         )

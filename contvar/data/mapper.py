@@ -1,50 +1,42 @@
 import os
 import glob
 import json
-import random
+
+
+class DmsProteinSplitError(Exception):
+    """Raised when the fixed protein-level DMS split configuration is invalid."""
 
 
 class TripletDataPathMapper:
     """Maps protein file structure to anchor-positive-negative triplets.
 
-    New split logic (per-family hold-out):
-        - ALL 97 protein families participate in BOTH training and validation.
-        - For each family, 2 positives + 2 negatives are held out for validation.
-        - The remaining variants (typically 48+48) are used for training.
-        - No test split is created.
-        - The split can be saved to / loaded from a JSON file for reproducibility.
+    Stage-2 DMS training always uses a fixed protein-level split JSON where each
+    protein family basename maps to one of: ``train``, ``val``, ``test``.
+    All variants for a reserved family stay in the same split.
     """
 
-    SPLIT_FILENAME = "split.json"
+    VALID_SPLITS = ("train", "val", "test")
 
-    def __init__(self, root_dir, val_pos=2, val_neg=2, seed=42, split_path=None):
+    def __init__(self, root_dir, split_json_path):
         """
         Args:
             root_dir: Path to protein_triplets_data directory.
-            val_pos: Number of positive variants to hold out per family for validation.
-            val_neg: Number of negative variants to hold out per family for validation.
-            seed: Random seed for reproducible split generation.
-            split_path: If provided, load an existing split from this JSON file
-                        instead of generating a new one. Set to None to create fresh.
+            split_json_path: Path to fixed protein-level JSON split file.
         """
         self.root_dir = root_dir
-        self.val_pos = val_pos
-        self.val_neg = val_neg
-        self.seed = seed
+        self.split_json_path = split_json_path
 
         # All protein family data (full, before splitting)
         self.triplets = []
 
-        # Per-family split: train and val variants separated
+        # Per-split triplets at the family level
         self.train_triplets = []
         self.val_triplets = []
+        self.test_triplets = []
+        self.family_to_protein_id = {}
 
         self._map_data()
-
-        if split_path and os.path.exists(split_path):
-            self._load_split(split_path)
-        else:
-            self._split_data()
+        self._load_fixed_split()
 
     def _map_data(self):
         """Discover all protein families and their variant files."""
@@ -70,110 +62,132 @@ class TripletDataPathMapper:
         self.triplets.sort(key=lambda t: t['protein_id'])
         print(f"Found {len(self.triplets)} protein families")
 
-    def _split_data(self):
-        """Hold out val_pos positives + val_neg negatives per family."""
-        random.seed(self.seed)
+    def _load_json_bundle(self):
+        """Read and validate the protein-level split JSON."""
+        if not self.split_json_path:
+            raise DmsProteinSplitError(
+                "ProjectConfig.dms_protein_split_json_path is not set."
+            )
+        if not os.path.isfile(self.split_json_path):
+            raise DmsProteinSplitError(
+                f"DMS protein split JSON not found: {self.split_json_path}"
+            )
+
+        try:
+            with open(self.split_json_path, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise DmsProteinSplitError(
+                f"Failed to parse DMS protein split JSON at {self.split_json_path}: {exc.msg}"
+            ) from exc
+        except OSError as exc:
+            raise DmsProteinSplitError(
+                f"Could not read DMS protein split JSON at {self.split_json_path}: {exc}"
+            ) from exc
+
+        family_to_split = data.get("family_to_split")
+        if not isinstance(family_to_split, dict) or not family_to_split:
+            raise DmsProteinSplitError(
+                f"DMS protein split JSON must contain a non-empty top-level "
+                f"'family_to_split' mapping: {self.split_json_path}"
+            )
+
+        invalid_labels = {
+            family: split_name
+            for family, split_name in family_to_split.items()
+            if split_name not in self.VALID_SPLITS
+        }
+        if invalid_labels:
+            sample_family, sample_split = next(iter(invalid_labels.items()))
+            raise DmsProteinSplitError(
+                f"Invalid split label {sample_split!r} for family {sample_family!r}. "
+                f"Allowed labels: {', '.join(self.VALID_SPLITS)}."
+            )
+
+        family_to_protein_id = data.get("family_to_protein_id", {})
+        if family_to_protein_id and not isinstance(family_to_protein_id, dict):
+            raise DmsProteinSplitError(
+                f"'family_to_protein_id' must be a mapping when provided: {self.split_json_path}"
+            )
+
+        return family_to_split, family_to_protein_id
+
+    def _validate_split_coverage(self, family_to_split, family_to_protein_id):
+        """Ensure JSON keys match exact family basenames present on disk."""
+        dataset_families = {t['protein_id'] for t in self.triplets}
+        split_families = set(family_to_split)
+
+        missing_in_json = sorted(dataset_families - split_families)
+        extra_in_json = sorted(split_families - dataset_families)
+        if missing_in_json or extra_in_json:
+            details = []
+            if missing_in_json:
+                details.append(
+                    "missing from JSON: " + ", ".join(repr(x) for x in missing_in_json[:5])
+                )
+            if extra_in_json:
+                details.append(
+                    "not found in protein_triplets_data: "
+                    + ", ".join(repr(x) for x in extra_in_json[:5])
+                )
+            raise DmsProteinSplitError(
+                "DMS protein split family names must match the exact anchor basenames "
+                "under protein_triplets_data/originals. " + " | ".join(details)
+            )
+
+        if family_to_protein_id:
+            accession_families = set(family_to_protein_id)
+            missing_accessions = sorted(dataset_families - accession_families)
+            extra_accessions = sorted(accession_families - dataset_families)
+            if missing_accessions or extra_accessions:
+                details = []
+                if missing_accessions:
+                    details.append(
+                        "missing accession entries: "
+                        + ", ".join(repr(x) for x in missing_accessions[:5])
+                    )
+                if extra_accessions:
+                    details.append(
+                        "extra accession entries: "
+                        + ", ".join(repr(x) for x in extra_accessions[:5])
+                    )
+                raise DmsProteinSplitError(
+                    "family_to_protein_id keys must match the same family basenames as "
+                    "family_to_split. " + " | ".join(details)
+                )
+
+    def _load_fixed_split(self):
+        """Assign entire protein families to train/val/test from the JSON bundle."""
+        family_to_split, family_to_protein_id = self._load_json_bundle()
+        self._validate_split_coverage(family_to_split, family_to_protein_id)
+
         self.train_triplets = []
         self.val_triplets = []
+        self.test_triplets = []
+        self.family_to_protein_id = family_to_protein_id or {}
+
+        split_to_triplets = {
+            "train": self.train_triplets,
+            "val": self.val_triplets,
+            "test": self.test_triplets,
+        }
 
         for t in self.triplets:
-            pos_files = list(t['positives'])
-            neg_files = list(t['negatives'])
+            family_name = t['protein_id']
+            split_name = family_to_split[family_name]
+            record = dict(t)
+            if self.family_to_protein_id:
+                record['accession'] = self.family_to_protein_id.get(family_name)
+            split_to_triplets[split_name].append(record)
 
-            random.shuffle(pos_files)
-            random.shuffle(neg_files)
-
-            val_p = pos_files[:self.val_pos]
-            train_p = pos_files[self.val_pos:]
-
-            val_n = neg_files[:self.val_neg]
-            train_n = neg_files[self.val_neg:]
-
-            self.train_triplets.append({
-                'anchor': t['anchor'],
-                'positives': train_p,
-                'negatives': train_n,
-                'protein_id': t['protein_id']
-            })
-            self.val_triplets.append({
-                'anchor': t['anchor'],
-                'positives': val_p,
-                'negatives': val_n,
-                'protein_id': t['protein_id']
-            })
-
-        total_train_p = sum(len(tr['positives']) for tr in self.train_triplets)
-        total_train_n = sum(len(tr['negatives']) for tr in self.train_triplets)
-        total_val_p = sum(len(vl['positives']) for vl in self.val_triplets)
-        total_val_n = sum(len(vl['negatives']) for vl in self.val_triplets)
-
-        print(f"Split (per-family hold-out, seed={self.seed}):")
-        print(f"  Families: {len(self.triplets)}")
-        print(f"  Train variants: {total_train_p} positives, {total_train_n} negatives")
-        print(f"  Val variants  : {total_val_p} positives, {total_val_n} negatives")
-
-    def save_split(self, path=None):
-        """Save the current split to a JSON file for reproducibility."""
-        if path is None:
-            path = os.path.join(self.root_dir, self.SPLIT_FILENAME)
-
-        split_data = {}
-        for train_t, val_t in zip(self.train_triplets, self.val_triplets):
-            pid = train_t['protein_id']
-            split_data[pid] = {
-                'val_positives': [os.path.basename(p) for p in val_t['positives']],
-                'val_negatives': [os.path.basename(n) for n in val_t['negatives']],
-            }
-
-        with open(path, 'w') as f:
-            json.dump({'seed': self.seed, 'val_pos': self.val_pos,
-                       'val_neg': self.val_neg, 'families': split_data}, f, indent=2)
-
-        print(f"Split saved to {path}")
-
-    def _load_split(self, path):
-        """Load a previously saved split from JSON."""
-        with open(path, 'r') as f:
-            saved = json.load(f)
-
-        families_map = saved['families']
-        self.train_triplets = []
-        self.val_triplets = []
-
-        loaded_count = 0
-        for t in self.triplets:
-            pid = t['protein_id']
-            if pid not in families_map:
-                self.train_triplets.append(t)
-                self.val_triplets.append({
-                    'anchor': t['anchor'], 'positives': [], 'negatives': [],
-                    'protein_id': pid
-                })
-                continue
-
-            saved_family = families_map[pid]
-            val_pos_basenames = set(saved_family['val_positives'])
-            val_neg_basenames = set(saved_family['val_negatives'])
-
-            train_p = [p for p in t['positives'] if os.path.basename(p) not in val_pos_basenames]
-            val_p = [p for p in t['positives'] if os.path.basename(p) in val_pos_basenames]
-            train_n = [n for n in t['negatives'] if os.path.basename(n) not in val_neg_basenames]
-            val_n = [n for n in t['negatives'] if os.path.basename(n) in val_neg_basenames]
-
-            self.train_triplets.append({
-                'anchor': t['anchor'], 'positives': train_p,
-                'negatives': train_n, 'protein_id': pid
-            })
-            self.val_triplets.append({
-                'anchor': t['anchor'], 'positives': val_p,
-                'negatives': val_n, 'protein_id': pid
-            })
-            loaded_count += 1
-
-        total_val_p = sum(len(vl['positives']) for vl in self.val_triplets)
-        total_val_n = sum(len(vl['negatives']) for vl in self.val_triplets)
-        print(f"Loaded split from {path} ({loaded_count} families matched)")
-        print(f"  Val variants: {total_val_p} positives, {total_val_n} negatives")
+        print(f"Loaded fixed DMS protein split from {self.split_json_path}")
+        for split_name, split_triplets in split_to_triplets.items():
+            total_pos = sum(len(t['positives']) for t in split_triplets)
+            total_neg = sum(len(t['negatives']) for t in split_triplets)
+            print(
+                f"  {split_name.capitalize():<5} families: {len(split_triplets):>3} | "
+                f"variants: {total_pos} positives, {total_neg} negatives"
+            )
 
     def get_split(self, split='train'):
         """Get triplets for a specific split."""
@@ -181,5 +195,9 @@ class TripletDataPathMapper:
             return self.train_triplets
         elif split == 'val':
             return self.val_triplets
+        elif split == 'test':
+            return self.test_triplets
         else:
-            raise ValueError(f"Unknown split: {split}. Use 'train' or 'val'")
+            raise ValueError(
+                f"Unknown split: {split}. Use 'train', 'val', or 'test'"
+            )

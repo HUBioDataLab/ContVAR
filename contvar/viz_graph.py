@@ -7,7 +7,7 @@ import networkx as nx
 import wandb
 
 from contvar.config import ProjectConfig
-from contvar.data.mapper import TripletDataPathMapper
+from contvar.data.mapper import TripletDataPathMapper, DmsProteinSplitError
 
 
 def visualize_graph(protein_id=None, data_root=None, device=None):
@@ -24,7 +24,14 @@ def visualize_graph(protein_id=None, data_root=None, device=None):
     print("Starting visualization...")
 
     cfg = ProjectConfig()
-    mapper = TripletDataPathMapper(data_root, val_pos=2, val_neg=2)
+    try:
+        mapper = TripletDataPathMapper(
+            data_root,
+            split_json_path=cfg.dms_protein_split_json_path,
+        )
+    except DmsProteinSplitError as exc:
+        print(f"DMS split configuration error: {exc}")
+        return
 
     if not mapper.triplets:
         print("No data found!")
