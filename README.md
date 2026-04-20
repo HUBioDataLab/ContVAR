@@ -133,7 +133,7 @@ Tamamı `ProjectConfig` üzerinden değiştirilebilir.
 
 ## Konfigürasyon
 
-Tüm temel hiperparametreler ve yollar `contvar/config.py` içindeki **`ProjectConfig`** sınıfında toplanır: kenar modu, epoch, margin, batch boyutları, müfredat (warmup epoch sayısı), Phase-1 erken durdurma penceresi, GO TSV dizini, `go_max_triplets_per_ontology`, `go_prebuilt_graph_root`, vb.
+Tüm temel hiperparametreler ve yollar `contvar/config.py` içindeki **`ProjectConfig`** sınıfında toplanır: kenar modu, epoch, margin, batch boyutları, müfredat (warmup epoch sayısı), Phase-1 erken durdurma penceresi, GO TSV dizini, `go_prebuilt_graph_root`, vb.
 
 `train_pipeline(..., config={...})` ile sözlük override (ör. WandB sweep) desteklenir; yerel `train.py` şu an bu sözlüğü CLI’dan geçirmez — deney parametreleri için `run.ipynb`, WandB veya `config.py` düzenlemesi kullanılır.
 

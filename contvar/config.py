@@ -67,8 +67,7 @@ class ProjectConfig:
         self.go_sampling_enabled = True
         self.go_sampling_ratio = {"mf": 0.6, "bp": 0.2, "cc": 0.2}
         self.go_log_sampling_stats = True
-        # Limit and loader settings for GO pretraining
-        self.go_max_triplets_per_ontology = 1000  # subsample for Colab; can be overridden
+        # Loader settings for GO pretraining
         self.go_num_workers = 0  # DataLoader workers for GO (0 is safer on Colab)
 
         # Paths for GO pretraining

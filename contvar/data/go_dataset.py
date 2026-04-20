@@ -120,19 +120,6 @@ class GOSemanticTripletDataset(Dataset):
             f"(available proteins={len(available_ids):,})"
         )
 
-        max_triplets = getattr(self.config, "go_max_triplets_per_ontology", None)
-        if max_triplets is not None and len(self.triplets) > max_triplets:
-            original_len = len(self.triplets)
-            seed = int(getattr(self.config, "go_split_seed", 42))
-            if self.phase0_split:
-                seed += {"train": 0, "val": 1, "test": 2}[self.phase0_split]
-            rng = random.Random(seed)
-            self.triplets = rng.sample(self.triplets, max_triplets)
-            print(
-                f"[GO-{self.ontology}] Subsampled triplets: {original_len:,} -> "
-                f"{len(self.triplets):,} (max={max_triplets})"
-            )
-
     def _parse_tsv(self):
         if not os.path.exists(self.tsv_path):
             print(f"[GO-{self.ontology}] TSV not found: {self.tsv_path} (skipping)")
