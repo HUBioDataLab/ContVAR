@@ -249,6 +249,8 @@ def train_pipeline(config=None, force=False, data_root=None,
     print("="*60)
 
     best_val_loss = float('inf')
+    best_epoch = None
+    best_model_path = "model_best_loss.pt"
 
     for epoch in range(cfg.epochs):
         train_loader = streaming_mining_batch_iterator(
@@ -456,7 +458,6 @@ def train_pipeline(config=None, force=False, data_root=None,
         # VALIDATION
         # =====================================================================
         val_metrics = evaluate(model, val_loader, val_criterion, device, margin=cfg.margin)
-        test_metrics = evaluate(model, test_loader, val_criterion, device, margin=cfg.margin)
 
         embedding_stats = compute_embedding_stats(
             model, val_loader, device, val_criterion, max_batches=20
@@ -477,15 +478,6 @@ def train_pipeline(config=None, force=False, data_root=None,
             "val/R@1": val_metrics.get("R@1", 0),
             "val/Alignment": val_metrics.get("Alignment", 0),
             "val/Uniformity": val_metrics.get("Uniformity", 0),
-            "test/loss": test_metrics.get("loss", 0),
-            "test/loss_g": test_metrics.get("loss_g", 0),
-            "test/loss_l": test_metrics.get("loss_l", 0),
-            "test/AUROC": test_metrics.get("AUROC", 0),
-            "test/Simple_Acc": test_metrics.get("Simple_Acc", 0),
-            "test/MRR": test_metrics.get("MRR", 0),
-            "test/R@1": test_metrics.get("R@1", 0),
-            "test/Alignment": test_metrics.get("Alignment", 0),
-            "test/Uniformity": test_metrics.get("Uniformity", 0),
             "train/epoch_duration_sec": epoch_duration_sec,
             "train/epoch_overfit_gap": val_metrics.get("loss", 0) - avg_train_loss,
             "train/epoch_num_batches": valid_batches,
@@ -513,7 +505,8 @@ def train_pipeline(config=None, force=False, data_root=None,
         # Save best model
         if val_metrics.get("loss", float('inf')) < best_val_loss:
             best_val_loss = val_metrics["loss"]
-            model_name = "model_best_loss.pt"
+            best_epoch = epoch + 1
+            model_name = best_model_path
             torch.save(model.state_dict(), model_name)
 
             artifact = wandb.Artifact(
@@ -525,21 +518,58 @@ def train_pipeline(config=None, force=False, data_root=None,
             wandb.log_artifact(artifact)
             log_dict["best_model_saved"] = True
         log_dict["val/best_loss_so_far"] = best_val_loss
+        log_dict["val/best_epoch_so_far"] = best_epoch if best_epoch is not None else 0
 
         wandb.log(log_dict)
 
         saved_str = "(Saved)" if log_dict.get("best_model_saved") else ""
         print(f"[Stage2] Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | "
               f"Val Loss: {val_metrics.get('loss', 0):.4f} | "
-              f"Test Loss: {test_metrics.get('loss', 0):.4f} | "
               f"Val AUROC: {val_metrics.get('AUROC', 0):.4f} | "
-              f"Test AUROC: {test_metrics.get('AUROC', 0):.4f} | "
               f"Local[E:{epoch_local_easy_total} S:{epoch_local_semi_hard_total} H:{epoch_local_hard_total}] "
               f"{saved_str}")
 
     # Save last epoch model
     torch.save(model.state_dict(), "model_last.pt")
     print("Saved last epoch model to model_last.pt")
+
+    if best_epoch is not None and os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
+        best_val_metrics = evaluate(model, val_loader, val_criterion, device, margin=cfg.margin)
+        best_test_metrics = evaluate(model, test_loader, val_criterion, device, margin=cfg.margin)
+
+        final_log = {
+            "best/epoch": best_epoch,
+            "best/val_loss": best_val_metrics.get("loss", 0),
+            "best/val_loss_g": best_val_metrics.get("loss_g", 0),
+            "best/val_loss_l": best_val_metrics.get("loss_l", 0),
+            "best/val_AUROC": best_val_metrics.get("AUROC", 0),
+            "best/val_Simple_Acc": best_val_metrics.get("Simple_Acc", 0),
+            "best/val_MRR": best_val_metrics.get("MRR", 0),
+            "best/val_R@1": best_val_metrics.get("R@1", 0),
+            "best/val_Alignment": best_val_metrics.get("Alignment", 0),
+            "best/val_Uniformity": best_val_metrics.get("Uniformity", 0),
+            "best/test_loss": best_test_metrics.get("loss", 0),
+            "best/test_loss_g": best_test_metrics.get("loss_g", 0),
+            "best/test_loss_l": best_test_metrics.get("loss_l", 0),
+            "best/test_AUROC": best_test_metrics.get("AUROC", 0),
+            "best/test_Simple_Acc": best_test_metrics.get("Simple_Acc", 0),
+            "best/test_MRR": best_test_metrics.get("MRR", 0),
+            "best/test_R@1": best_test_metrics.get("R@1", 0),
+            "best/test_Alignment": best_test_metrics.get("Alignment", 0),
+            "best/test_Uniformity": best_test_metrics.get("Uniformity", 0),
+        }
+        wandb.log(final_log)
+        for key, value in final_log.items():
+            run.summary[key] = value
+
+        print(f"[Stage2] Best checkpoint (epoch {best_epoch}) | "
+              f"Val Loss: {best_val_metrics.get('loss', 0):.4f} | "
+              f"Test Loss: {best_test_metrics.get('loss', 0):.4f} | "
+              f"Val AUROC: {best_val_metrics.get('AUROC', 0):.4f} | "
+              f"Test AUROC: {best_test_metrics.get('AUROC', 0):.4f}")
+    else:
+        print("Warning: No best validation checkpoint was saved, so final test evaluation was skipped.")
 
     wandb.finish()
     print("\nTraining completed!")

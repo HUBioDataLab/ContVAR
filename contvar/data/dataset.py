@@ -22,7 +22,7 @@ class TripletProteinGraphDataset(Dataset):
 
     Supports two edge construction modes:
     - "salad": SALAD-style hybrid edges (index + spatial + random neighbors)
-    - "graphein": Classical graphein edges (kNN, distance threshold, etc.)
+    - "graphein": Graphein kNN edges with Euclidean distance edge features
     """
 
     def __init__(self, mapper, root, config: ProjectConfig, split='train',
@@ -58,9 +58,7 @@ class TripletProteinGraphDataset(Dataset):
         else:  # graphein mode
             self.salad_edge_builder = None
             self.edge_funcs = self.config.get_active_edge_funcs()
-            self.edge_attributes = ['kind', 'edge_attr', 'euclidean_distance']
-            print(f"Using Graphein edges: kNN={config.edge_knn} (k={config.knn_k}), "
-                  f"distance={config.edge_distance} (thresh={config.dist_threshold})")
+            print(f"Using Graphein kNN edges: k={config.knn_k}")
 
         # Store all triplets for processing
         self.all_triplets = mapper.triplets
@@ -158,9 +156,6 @@ class TripletProteinGraphDataset(Dataset):
 
     def _process_graph(self, g, chain_id, pdb_path, pdb_code):
         """Process graph node features and edge features."""
-        unique_edge_types = ["peptide_bond", "aromatic", "disulfide", "hydrogen_bond",
-                            "hydrophobic", "ionic", "k_nn", "distance_threshold"]
-
         protein_embedding = None
         key = pdb_code.lower()
         if key.endswith("_model"):
@@ -198,26 +193,11 @@ class TripletProteinGraphDataset(Dataset):
         # Process edges (only for graphein mode)
         if self.config.edge_mode == "graphein":
             for s, t, d in g.edges(data=True):
-                edge_type = list(d.get("kind", []))
-                if "knn" in edge_type and len(edge_type) > 1:
-                    edge_type.remove("knn")
-
-                d["edge_attr"] = [self._one_hot_encode([_type], unique_edge_types)[0].tolist() for _type in edge_type]
-                d["kind"] = edge_type
-
                 source_coords = g.nodes[s]["coords"]
                 target_coords = g.nodes[t]["coords"]
                 d["euclidean_distance"] = round(np.sqrt(np.sum(np.square(source_coords - target_coords))).item(), 5)
 
         return g
-
-    def _one_hot_encode(self, classes, class_labels):
-        """One-hot encode edge types for graphein mode"""
-        encoding = np.zeros((len(classes), len(class_labels)))
-        for i, class_ in enumerate(classes):
-            if class_ in class_labels:
-                encoding[i, class_labels.index(class_)] = 1
-        return encoding
 
     def _create_pyg_data(self, g, to_undirected_graph=True):
         """Convert NetworkX graph to PyTorch Geometric Data object"""
@@ -280,7 +260,7 @@ class TripletProteinGraphDataset(Dataset):
         return data
 
     def _create_pyg_data_graphein(self, g, to_undirected_graph=True):
-        """Create PyG Data object with Graphein-style edges"""
+        """Create PyG Data object with Graphein kNN edges."""
         node_indexes_mapping = {}
         node_features = collections.defaultdict(list)
         residue_numbers = []
@@ -303,12 +283,8 @@ class TripletProteinGraphDataset(Dataset):
 
         edge_features = collections.defaultdict(list)
         for s, t, d in g.edges(data=True):
-            for index, _ in enumerate(d.get("kind", [])):
-                edge_attr = []
-                edge_features["edge_index"].append([node_indexes_mapping[s], node_indexes_mapping[t]])
-                edge_attr.extend(d["edge_attr"][index])
-                edge_attr.append(d["euclidean_distance"])
-                edge_features["edge_attr"].append(edge_attr)
+            edge_features["edge_index"].append([node_indexes_mapping[s], node_indexes_mapping[t]])
+            edge_features["edge_attr"].append([d["euclidean_distance"]])
 
         data = Data()
         data.x = torch.tensor(node_features["x"], dtype=torch.float)
@@ -320,7 +296,7 @@ class TripletProteinGraphDataset(Dataset):
             data.edge_attr = torch.tensor(edge_features["edge_attr"], dtype=torch.float)
         else:
             data.edge_index = torch.empty((2, 0), dtype=torch.long)
-            data.edge_attr = torch.empty((0, 0), dtype=torch.float)
+            data.edge_attr = torch.empty((0, self.config.edge_attr_dim), dtype=torch.float)
 
         if to_undirected_graph and data.edge_index.numel() > 0:
             data.edge_index, data.edge_attr = to_undirected(data.edge_index, data.edge_attr)

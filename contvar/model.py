@@ -10,7 +10,7 @@ class DeepProteinGAT(nn.Module):
 
     This model supports both edge construction modes:
     - SALAD-style edges: RBF distance encoding + neighbor type + sequence distance (edge_dim=20)
-    - Graphein edges: edge type one-hot + euclidean distance (edge_dim=9)
+    - Graphein edges: kNN Euclidean distance only (edge_dim=1)
     """
 
     def __init__(self, input_dim, hidden_dim, output_dim, heads=4,
