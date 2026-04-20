@@ -134,7 +134,6 @@ def mine_negatives_streaming(model, anchor_embeds, pos_dists, batch_triplets,
 
 def streaming_mining_batch_iterator(model, triplets, processed_dir, device, cfg):
     """
-    Generator that yields pre-mined batches for Phase 2 training.
     Our purpose is to avoid GPU memory issues by streaming negatives in chunks during mining, rather than trying to mine all negatives for the entire dataset at once.
 
     Yields:

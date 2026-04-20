@@ -43,6 +43,12 @@ STARTER_PATHS = {
     "go_phase0_last_model_path": os.path.join(_REPO_ROOT, "model_phase0_last.pt"),
     "stage2_best_model_path": os.path.join(_REPO_ROOT, "model_best_loss.pt"),
     "stage2_last_model_path": os.path.join(_REPO_ROOT, "model_last.pt"),
+    "phase0_embeddings_export_path": os.path.join(
+        _REPO_ROOT, "exports", "phase0_contvar_embeddings.h5"
+    ),
+    "dms_embeddings_export_path": os.path.join(
+        _REPO_ROOT, "exports", "dms_variant_contvar_embeddings.h5"
+    ),
     "tsne_save_dir": os.path.join(_REPO_ROOT, "visualizations"),
 }
 
@@ -76,28 +82,6 @@ def _build_parser():
         action="store_true",
         help="Reprocess all protein graphs from scratch.",
     )
-    run_group.add_argument(
-        "--go-phase0-epochs",
-        type=int,
-        default=None,
-        help="Override the number of GO phase-0 epochs. Use 0 to skip phase-0.",
-    )
-    run_group.add_argument(
-        "--wandb-key",
-        type=str,
-        default=None,
-        help="WandB API key. You can also set WANDB_API_KEY in the environment.",
-    )
-    run_group.add_argument(
-        "--visualize",
-        action="store_true",
-        help="Run t-SNE visualization after training completes.",
-    )
-    run_group.add_argument(
-        "--print-paths",
-        action="store_true",
-        help="Print the starter path configuration and exit.",
-    )
 
     return parser
 
@@ -118,12 +102,12 @@ def _build_config_overrides(args, paths):
         "go_protein_split_json_path": paths["go_protein_split_json_path"],
         "stage2_best_model_path": paths["stage2_best_model_path"],
         "stage2_last_model_path": paths["stage2_last_model_path"],
+        "phase0_embeddings_export_path": paths["phase0_embeddings_export_path"],
+        "dms_embeddings_export_path": paths["dms_embeddings_export_path"],
         "tsne_save_dir": paths["tsne_save_dir"],
     }
 
-    if args.go_phase0_epochs is not None:
-        overrides["go_phase0_epochs"] = args.go_phase0_epochs
-    elif not paths["go_prebuilt_graph_root"]:
+    if not paths["go_prebuilt_graph_root"]:
         overrides["go_phase0_epochs"] = 0
 
     return overrides
@@ -143,6 +127,8 @@ def _print_path_summary(paths, config_overrides):
         "go_phase0_last_model_path",
         "stage2_best_model_path",
         "stage2_last_model_path",
+        "phase0_embeddings_export_path",
+        "dms_embeddings_export_path",
         "tsne_save_dir",
     ]
 
@@ -153,6 +139,48 @@ def _print_path_summary(paths, config_overrides):
     print(f"  go_phase0_epochs: {phase0_epochs}")
 
 
+def _build_runtime_config(config_overrides):
+    from contvar.config import ProjectConfig
+
+    cfg = ProjectConfig()
+    for key, value in config_overrides.items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, value)
+    return cfg
+
+
+def _run_post_training_exports(model, mapper, processed_dir, config_overrides, paths, env):
+    from contvar.export_embeddings import export_all_embeddings
+    from contvar.viz_tsne import visualize_tsne
+
+    cfg = _build_runtime_config(config_overrides)
+    export_all_embeddings(
+        model=model,
+        cfg=cfg,
+        device=env["device"],
+        data_root=env["data_root"],
+        embeddings_path=env["embeddings_path"],
+        go_prebuilt_graph_root=paths["go_prebuilt_graph_root"],
+        phase0_split_json_path=paths["go_protein_split_json_path"],
+        dms_split_json_path=paths["dms_protein_split_json_path"],
+        phase0_out_path=paths["phase0_embeddings_export_path"],
+        dms_out_path=paths["dms_embeddings_export_path"],
+        batch_size=32,
+        force_dms_reprocess=False,
+        include_dms_anchors=False,
+    )
+
+    print("\n=== Post-Training Visualization ===")
+    visualize_tsne(
+        model=model,
+        mapper=mapper,
+        processed_dir=processed_dir,
+        split="val",
+        device=env["device"],
+        save_dir=paths["tsne_save_dir"],
+    )
+
+
 def main():
     parser = _build_parser()
     args = parser.parse_args()
@@ -161,31 +189,22 @@ def main():
     config_overrides = _build_config_overrides(args, paths)
 
     _print_path_summary(paths, config_overrides)
-    if args.print_paths:
-        return
 
     if (
-        args.go_phase0_epochs is None
-        and not paths["go_prebuilt_graph_root"]
+        not paths["go_prebuilt_graph_root"]
         and config_overrides.get("go_phase0_epochs") == 0
     ):
         print(
             "\nGO phase-0 is disabled because no prebuilt GO graph directory was provided."
         )
 
-    import wandb
-
     from contvar.config import setup_environment
     from contvar.training import train_pipeline
-    from contvar.viz_tsne import visualize_tsne
 
     env = setup_environment(
         data_root=paths["data_root"],
         embeddings_path=paths["embeddings_path"],
     )
-
-    if args.wandb_key:
-        wandb.login(key=args.wandb_key)
 
     model, mapper, processed_dir = train_pipeline(
         config=config_overrides,
@@ -196,14 +215,14 @@ def main():
         data_zip=env.get("data_zip"),
     )
 
-    if args.visualize and model is not None:
-        visualize_tsne(
-            model=model,
-            mapper=mapper,
-            processed_dir=processed_dir,
-            split="val",
-            device=env["device"],
-            save_dir=paths["tsne_save_dir"],
+    if model is not None:
+        _run_post_training_exports(
+            model,
+            mapper,
+            processed_dir,
+            config_overrides,
+            paths,
+            env,
         )
 
 
