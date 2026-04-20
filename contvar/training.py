@@ -31,6 +31,15 @@ def _load_model_checkpoint(model, checkpoint_path, device):
     model.load_state_dict(state_dict)
 
 
+def _ensure_parent_dir(path):
+    """Create the parent directory for a file path when needed."""
+    if not path:
+        return
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def evaluate(model, loader, criterion, device, margin=0.3):
     """Evaluate model on a given dataloader with both global and local loss"""
     model.eval()
@@ -128,6 +137,11 @@ def train_pipeline(config=None, force=False, data_root=None,
     # Initialize config
     cfg = ProjectConfig()
 
+    if config:
+        for key, value in config.items():
+            if hasattr(cfg, key):
+                setattr(cfg, key, value)
+
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -138,12 +152,6 @@ def train_pipeline(config=None, force=False, data_root=None,
         reinit=True,
         settings=wandb.Settings(_disable_stats=True)
     )
-
-    # Update config from wandb if sweep is running
-    if config:
-        for key, value in config.items():
-            if hasattr(cfg, key):
-                setattr(cfg, key, value)
 
     # Resolve paths
     if data_root is None:
@@ -161,6 +169,8 @@ def train_pipeline(config=None, force=False, data_root=None,
     print(f"Eval Batch Size: {cfg.eval_batch_size}")
     print(f"Local Loss: Contrastive (attract good / repel bad at mutation position)")
     print(f"DMS protein split: {cfg.dms_protein_split_json_path}")
+    print(f"Stage-2 best checkpoint: {cfg.stage2_best_model_path}")
+    print(f"Stage-2 last checkpoint: {cfg.stage2_last_model_path}")
 
     shared_embeddings = None
     if force and embeddings_path:
@@ -270,7 +280,14 @@ def train_pipeline(config=None, force=False, data_root=None,
 
     best_val_loss = float('inf')
     best_epoch = None
-    best_model_path = "model_best_loss.pt"
+    best_model_path = (
+        getattr(cfg, "stage2_best_model_path", None) or "model_best_loss.pt"
+    )
+    last_model_path = (
+        getattr(cfg, "stage2_last_model_path", None) or "model_last.pt"
+    )
+    _ensure_parent_dir(best_model_path)
+    _ensure_parent_dir(last_model_path)
 
     for epoch in range(cfg.epochs):
         train_loader = streaming_mining_batch_iterator(
@@ -550,8 +567,8 @@ def train_pipeline(config=None, force=False, data_root=None,
               f"{saved_str}")
 
     # Save last epoch model
-    torch.save(model.state_dict(), "model_last.pt")
-    print("Saved last epoch model to model_last.pt")
+    torch.save(model.state_dict(), last_model_path)
+    print(f"Saved last epoch model to {last_model_path}")
 
     if best_epoch is not None and os.path.exists(best_model_path):
         model.load_state_dict(torch.load(best_model_path, map_location=device))

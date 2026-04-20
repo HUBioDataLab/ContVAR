@@ -12,11 +12,32 @@ from graphein.protein.features.nodes.amino_acid import amino_acid_one_hot
 from contvar.edges import SaladStyleEdgeBuilder
 
 
+def _normalize_path(path_value):
+    """Convert configured paths to absolute paths when possible."""
+    if path_value in (None, ""):
+        return None
+    return os.path.abspath(path_value)
+
+
+def _load_starter_paths():
+    """Load local and Colab path settings from starter.py when available."""
+    try:
+        from starter import COLAB_PATHS, STARTER_PATHS
+    except ImportError:
+        return {}, {}
+
+    local_paths = {
+        key: _normalize_path(value) for key, value in STARTER_PATHS.items()
+    }
+    colab_paths = dict(COLAB_PATHS)
+    return local_paths, colab_paths
+
+
 class ProjectConfig:
     """Centralized configuration for features, edges, and hyperparameters"""
 
     def __init__(self):
-        _repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        starter_paths, _ = _load_starter_paths()
 
         # Node Features
         self.use_embedding = True
@@ -51,7 +72,7 @@ class ProjectConfig:
         # Streaming Negative Mining Configuration
         self.mining_chunk_size = 10
 
-        # Stage-2 DMS training configuration
+        # Encoder, DMS training configuration
         self.mining_batch_size = 8
         self.eval_batch_size = 32
         self.grad_accumulation_steps = 4
@@ -72,29 +93,32 @@ class ProjectConfig:
 
         # Paths for GO pretraining
         # Directory containing semantic similarity TSVs
-        self.go_tsv_dir = os.path.join(
-            _repo_root, "semantic_similarity"
-        )
+        self.go_tsv_dir = starter_paths.get("go_tsv_dir")
         # Phase 0 loads protein graphs only from this directory (PyG Data .pt files).
         # Required when go_phase0_epochs > 0.
-        self.go_prebuilt_graph_root = None
+        self.go_prebuilt_graph_root = starter_paths.get("go_prebuilt_graph_root")
         # Optional initialization checkpoint for reusing saved GO-pretrained weights.
         # If set, the model is loaded from this path before any phase-0 training.
         # To skip recomputing phase 0 entirely, combine this with go_phase0_epochs = 0.
-        self.go_phase0_init_checkpoint_path = None
-        self.go_phase0_best_model_path = os.path.join(
-            _repo_root, "model_phase0_best_loss.pt"
+        self.go_phase0_init_checkpoint_path = starter_paths.get(
+            "go_phase0_init_checkpoint_path"
         )
-        self.go_phase0_last_model_path = os.path.join(
-            _repo_root, "model_phase0_last.pt"
+        self.go_phase0_best_model_path = starter_paths.get(
+            "go_phase0_best_model_path"
         )
-        self.dms_protein_split_json_path = os.path.join(
-            _repo_root, "local_splits", "dms_protein_split.json"
+        self.go_phase0_last_model_path = starter_paths.get(
+            "go_phase0_last_model_path"
+        )
+        self.dms_protein_split_json_path = starter_paths.get(
+            "dms_protein_split_json_path"
         )
         # Merged bundle: protein_id -> train|val|test (UniRef pipeline + optional graphless drop).
-        self.go_protein_split_json_path = os.path.join(
-            _repo_root, "local_splits", "phase0_protein_split_removed_graphless.json"
+        self.go_protein_split_json_path = starter_paths.get(
+            "go_protein_split_json_path"
         )
+        self.stage2_best_model_path = starter_paths.get("stage2_best_model_path")
+        self.stage2_last_model_path = starter_paths.get("stage2_last_model_path")
+        self.tsne_save_dir = starter_paths.get("tsne_save_dir")
         self.go_split_seed = 42
 
     @property
@@ -134,13 +158,6 @@ class ProjectConfig:
         if self.use_embedding: attrs.append("embedding")
         return attrs
 
-
-# Colab defaults for DMS triplets (zip on Drive, extracted under /content/...)
-_COLAB_DEFAULT_DATA_ROOT = "/content/content/content/protein_triplets_data"
-_COLAB_DEFAULT_DATA_ZIP = "/content/drive/MyDrive/ContVAR/protein_triplets_data_9march.zip"
-_COLAB_DEFAULT_EMBEDDINGS = "/content/drive/MyDrive/ContVAR/embeddings_variable.h5"
-
-
 def ensure_dms_triplets_unzipped(data_root, data_zip=None):
     """
     Extract the DMS protein_triplets zip if the expected folder is missing.
@@ -154,8 +171,10 @@ def ensure_dms_triplets_unzipped(data_root, data_zip=None):
         return
 
     is_colab = "google.colab" in sys.modules
+    _, colab_paths = _load_starter_paths()
+    extract_root = colab_paths.get("extract_root", "/content/")
     if data_zip is None and is_colab:
-        data_zip = _COLAB_DEFAULT_DATA_ZIP
+        data_zip = colab_paths.get("data_zip")
 
     if not data_zip or not os.path.isfile(data_zip):
         if data_root:
@@ -167,9 +186,9 @@ def ensure_dms_triplets_unzipped(data_root, data_zip=None):
 
     import zipfile
 
-    print(f"Unzipping {data_zip} to /content/...")
+    print(f"Unzipping {data_zip} to {extract_root}...")
     with zipfile.ZipFile(data_zip, "r") as zip_ref:
-        zip_ref.extractall("/content/")
+        zip_ref.extractall(extract_root)
     print("Unzipping complete.")
 
 
@@ -196,28 +215,29 @@ def setup_environment(
     print(f"Device: {device}")
 
     is_colab = 'google.colab' in sys.modules
+    starter_paths, colab_paths = _load_starter_paths()
 
     if is_colab:
         if data_root is None:
-            data_root = _COLAB_DEFAULT_DATA_ROOT
+            data_root = colab_paths.get("data_root")
         if embeddings_path is None:
-            embeddings_path = _COLAB_DEFAULT_EMBEDDINGS
+            embeddings_path = colab_paths.get("embeddings_path")
         if data_zip is None:
-            data_zip = _COLAB_DEFAULT_DATA_ZIP
+            data_zip = colab_paths.get("data_zip")
+        extract_root = colab_paths.get("extract_root", "/content/")
 
         # Unzip data if needed (optional: defer to train_pipeline via prepare_dms_triplets_zip=False)
         if prepare_dms_triplets_zip and not os.path.exists(data_root) and data_zip and os.path.exists(data_zip):
             import zipfile
-            print(f"Unzipping {data_zip} to /content/...")
+            print(f"Unzipping {data_zip} to {extract_root}...")
             with zipfile.ZipFile(data_zip, 'r') as zip_ref:
-                zip_ref.extractall("/content/")
+                zip_ref.extractall(extract_root)
             print("Unzipping complete.")
     else:
         if data_root is None:
-            # Default local path: relative to project root
-            data_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "protein_triplets_data")
+            data_root = starter_paths.get("data_root")
         if embeddings_path is None:
-            embeddings_path = os.path.join(data_root, "..", "embeddings_variable.h5")
+            embeddings_path = starter_paths.get("embeddings_path")
         data_zip = None
 
     return {
