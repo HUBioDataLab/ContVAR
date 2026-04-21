@@ -12,9 +12,12 @@ from torch_geometric.data import Batch
 from contvar.config import ProjectConfig
 from contvar.data.go_dataset import GOSemanticTripletDataset
 from contvar.go_identity_split import load_protein_to_split_json
+from contvar.metrics import compute_detailed_metrics
 
 # Ontology order matches meeting pseudocode (MF → BP → CC).
 _GO_ONTOLOGY_ORDER: Tuple[str, ...] = ("mf", "bp", "cc")
+_GO_DETAIL_METRIC_NAMES: Tuple[str, ...] = ("Alignment", "Uniformity", "MRR")
+_GO_SUMMARIZED_METRIC_NAMES: Tuple[str, ...] = ("loss",) + _GO_DETAIL_METRIC_NAMES
 
 
 def _triplet_loss(anchor, positive, negative, margin: float):
@@ -102,6 +105,14 @@ def _triplet_batch_size(batch_triplet: Tuple[Batch, Batch, Batch]) -> int:
     return int(getattr(ba, "num_graphs", 0)) or 0
 
 
+def _mean_metric_lists(metric_lists: Dict[str, List[float]]) -> Dict[str, float]:
+    return {
+        metric_name: sum(values) / len(values)
+        for metric_name, values in metric_lists.items()
+        if values
+    }
+
+
 def _compute_go_phase0_loss(
     model,
     batch_dict: Dict[str, Tuple[Batch, Batch, Batch]],
@@ -130,12 +141,18 @@ def _compute_go_phase0_loss(
         zn = model.forward_go_head(bneg, ont)
 
         loss_ont, d_pos, d_neg = _triplet_loss(za, zp, zn, margin=margin)
+        detailed_metrics = compute_detailed_metrics(
+            za.detach(), zp.detach(), zn.detach()
+        )
         losses.append(loss_ont)
         per_ont[ont] = {
             "loss": loss_ont.item(),
             "avg_pos_dist": d_pos.mean().item(),
             "avg_neg_dist": d_neg.mean().item(),
             "dist_margin": (d_neg.mean() - d_pos.mean()).item(),
+            "Alignment": detailed_metrics["Alignment"],
+            "Uniformity": detailed_metrics["Uniformity"],
+            "MRR": detailed_metrics["MRR"],
         }
 
     if not losses:
@@ -171,27 +188,55 @@ def _mean_eval_loss_for_loaders(
     device: torch.device,
     margin: float,
     ontologies: List[str],
-) -> Optional[float]:
-    """Average per-batch loss across all batches and ontologies (eval mode)."""
+    metric_prefix: Optional[str] = None,
+) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
+    """Average eval loss and detailed metrics overall and per ontology."""
     model.eval()
-    batch_losses: List[float] = []
+    overall_metric_lists = {
+        metric_name: [] for metric_name in _GO_SUMMARIZED_METRIC_NAMES
+    }
+    per_ont_metric_lists: Dict[str, Dict[str, List[float]]] = {}
     with torch.no_grad():
         for ont in ontologies:
             loader = loaders.get(ont)
             if loader is None:
                 continue
+            ont_metric_lists = {
+                metric_name: [] for metric_name in _GO_SUMMARIZED_METRIC_NAMES
+            }
             for batch in loader:
                 if batch is None:
                     continue
                 batch_dict = {ont: batch}
-                loss, _ = _compute_go_phase0_loss(
+                loss, per_ont = _compute_go_phase0_loss(
                     model, batch_dict, device, margin, [ont]
                 )
-                if loss is not None:
-                    batch_losses.append(loss.item())
-    if not batch_losses:
-        return None
-    return sum(batch_losses) / len(batch_losses)
+                if loss is None or ont not in per_ont:
+                    continue
+                ont_stats = per_ont[ont]
+                for metric_name in _GO_SUMMARIZED_METRIC_NAMES:
+                    metric_value = float(ont_stats[metric_name])
+                    overall_metric_lists[metric_name].append(metric_value)
+                    ont_metric_lists[metric_name].append(metric_value)
+                if metric_prefix:
+                    batch_log = {
+                        f"{metric_prefix}/batch_loss": ont_stats["loss"],
+                        f"{metric_prefix}/{ont}/batch_loss": ont_stats["loss"],
+                    }
+                    for metric_name in _GO_DETAIL_METRIC_NAMES:
+                        batch_log[f"{metric_prefix}/{metric_name}_batch"] = (
+                            ont_stats[metric_name]
+                        )
+                        batch_log[f"{metric_prefix}/{ont}/{metric_name}_batch"] = (
+                            ont_stats[metric_name]
+                        )
+                    wandb.log(batch_log)
+            if ont_metric_lists["loss"]:
+                per_ont_metric_lists[ont] = ont_metric_lists
+    return _mean_metric_lists(overall_metric_lists), {
+        ont: _mean_metric_lists(metric_lists)
+        for ont, metric_lists in per_ont_metric_lists.items()
+    }
 
 
 def _build_go_loader(
@@ -308,7 +353,6 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
                 continue
             n = len(ld[ont].dataset)
             print(f"[Phase0] {split_label} triplets [{ont}]: {n:,}")
-            wandb.log({f"phase0/split/{split_label}_triplets_{ont}": n})
 
     if not loaders:
         print("No GO loaders constructed for phase 0, skipping.")
@@ -320,6 +364,9 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
     last_checkpoint_path = getattr(cfg, "go_phase0_last_model_path", None)
     best_metric = float("inf")
     best_epoch = None
+    train_metric_prefix = "phase0-train"
+    val_metric_prefix = "phase0-val"
+    test_metric_prefix = "phase0-test"
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.go_lr, weight_decay=cfg.weight_decay
@@ -346,6 +393,15 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         model.train()
         epoch_loss = 0.0
         epoch_steps = 0
+        epoch_ont_loss_sums = {ont: 0.0 for ont in active_ontologies}
+        epoch_ont_loss_counts = {ont: 0 for ont in active_ontologies}
+        epoch_metric_sums = {
+            metric_name: 0.0 for metric_name in _GO_DETAIL_METRIC_NAMES
+        }
+        epoch_ont_metric_sums = {
+            ont: {metric_name: 0.0 for metric_name in _GO_DETAIL_METRIC_NAMES}
+            for ont in active_ontologies
+        }
 
         gens: Dict[str, Iterator] = {
             ont: _infinite_batches(loaders[ont]) for ont in active_ontologies
@@ -407,15 +463,30 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
             epoch_steps += 1
 
             log_dict = {
-                "phase0/combined_batch_loss": loss.item(),
-                "phase0/n_ontologies_in_batch": len(per_ont),
-                "phase0/epoch": epoch + 1,
+                f"{train_metric_prefix}/batch_loss": loss.item(),
+                f"{train_metric_prefix}/combined_batch_loss": loss.item(),
+                f"{train_metric_prefix}/n_ontologies_in_batch": len(per_ont),
             }
+            for metric_name in _GO_DETAIL_METRIC_NAMES:
+                metric_values = [st[metric_name] for st in per_ont.values()]
+                if metric_values:
+                    batch_metric_value = sum(metric_values) / len(metric_values)
+                    log_dict[f"{train_metric_prefix}/{metric_name}_batch"] = (
+                        batch_metric_value
+                    )
+                    epoch_metric_sums[metric_name] += batch_metric_value
             for ont, st in per_ont.items():
-                log_dict[f"phase0/{ont}/batch_loss"] = st["loss"]
-                log_dict[f"phase0/{ont}/avg_pos_dist"] = st["avg_pos_dist"]
-                log_dict[f"phase0/{ont}/avg_neg_dist"] = st["avg_neg_dist"]
-                log_dict[f"phase0/{ont}/dist_margin"] = st["dist_margin"]
+                log_dict[f"{train_metric_prefix}/{ont}/batch_loss"] = st["loss"]
+                log_dict[f"{train_metric_prefix}/{ont}/avg_pos_dist"] = st["avg_pos_dist"]
+                log_dict[f"{train_metric_prefix}/{ont}/avg_neg_dist"] = st["avg_neg_dist"]
+                log_dict[f"{train_metric_prefix}/{ont}/dist_margin"] = st["dist_margin"]
+                for metric_name in _GO_DETAIL_METRIC_NAMES:
+                    log_dict[f"{train_metric_prefix}/{ont}/{metric_name}_batch"] = (
+                        st[metric_name]
+                    )
+                    epoch_ont_metric_sums[ont][metric_name] += st[metric_name]
+                epoch_ont_loss_sums[ont] += st["loss"]
+                epoch_ont_loss_counts[ont] += 1
             wandb.log(log_dict)
 
         if epoch_steps > 0:
@@ -423,23 +494,41 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
         else:
             avg_loss = 0.0
 
-        wandb.log({"phase0/epoch_loss": avg_loss, "phase0/epoch": epoch + 1})
+        train_epoch_log = {
+            f"{train_metric_prefix}/loss_epoch": avg_loss,
+        }
+        for metric_name in _GO_DETAIL_METRIC_NAMES:
+            if epoch_steps > 0:
+                train_epoch_log[f"{train_metric_prefix}/{metric_name}_epoch"] = (
+                    epoch_metric_sums[metric_name] / epoch_steps
+                )
+        for ont in active_ontologies:
+            if epoch_ont_loss_counts[ont] > 0:
+                train_epoch_log[f"{train_metric_prefix}/{ont}/loss_epoch"] = (
+                    epoch_ont_loss_sums[ont] / epoch_ont_loss_counts[ont]
+                )
+                for metric_name in _GO_DETAIL_METRIC_NAMES:
+                    train_epoch_log[f"{train_metric_prefix}/{ont}/{metric_name}_epoch"] = (
+                        epoch_ont_metric_sums[ont][metric_name]
+                        / epoch_ont_loss_counts[ont]
+                    )
+        wandb.log(train_epoch_log)
         if log_sampling_stats:
             total_sampled_steps = sum(sampled_step_counts.values())
             total_sampled_batches = sum(sampled_batch_counts.values())
-            sampling_log = {"phase0/epoch": epoch + 1}
+            sampling_log = {}
             for ont in active_ontologies:
-                sampling_log[f"phase0/sampling/steps_{ont}"] = sampled_step_counts[ont]
-                sampling_log[f"phase0/sampling/samples_{ont}"] = sampled_batch_counts[ont]
-                sampling_log[f"phase0/sampling/target_ratio_{ont}"] = ratio_map.get(
+                sampling_log[f"{train_metric_prefix}/sampling/steps_{ont}"] = sampled_step_counts[ont]
+                sampling_log[f"{train_metric_prefix}/sampling/samples_{ont}"] = sampled_batch_counts[ont]
+                sampling_log[f"{train_metric_prefix}/sampling/target_ratio_{ont}"] = ratio_map.get(
                     ont, 0.0
                 )
-                sampling_log[f"phase0/sampling/actual_step_ratio_{ont}"] = (
+                sampling_log[f"{train_metric_prefix}/sampling/actual_step_ratio_{ont}"] = (
                     (sampled_step_counts[ont] / total_sampled_steps)
                     if total_sampled_steps > 0
                     else 0.0
                 )
-                sampling_log[f"phase0/sampling/actual_sample_ratio_{ont}"] = (
+                sampling_log[f"{train_metric_prefix}/sampling/actual_sample_ratio_{ont}"] = (
                     (sampled_batch_counts[ont] / total_sampled_batches)
                     if total_sampled_batches > 0
                     else 0.0
@@ -447,32 +536,79 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
             wandb.log(sampling_log)
         print(
             f"[Phase0] Epoch {epoch+1}/{cfg.go_phase0_epochs} | "
-            f"Avg Loss: {avg_loss:.4f}"
+            f"Avg Loss: {avg_loss:.4f} | "
+            f"Train MRR: {train_epoch_log.get(f'{train_metric_prefix}/MRR_epoch', 0.0):.4f}"
         )
 
         v_loss = None
         if protein_to_split and val_loaders:
-            v_loss = _mean_eval_loss_for_loaders(
-                model, val_loaders, device, cfg.go_margin, active_ontologies
+            v_metrics, v_metrics_per_ont = _mean_eval_loss_for_loaders(
+                model,
+                val_loaders,
+                device,
+                cfg.go_margin,
+                active_ontologies,
+                metric_prefix=val_metric_prefix,
             )
+            v_loss = v_metrics.get("loss")
             if v_loss is not None:
-                wandb.log(
-                    {"phase0/val/mean_loss": v_loss, "phase0/epoch": epoch + 1}
+                val_log = {f"{val_metric_prefix}/loss_epoch": v_loss}
+                for metric_name in _GO_DETAIL_METRIC_NAMES:
+                    if metric_name in v_metrics:
+                        val_log[f"{val_metric_prefix}/{metric_name}_epoch"] = v_metrics[
+                            metric_name
+                        ]
+                for ont, ont_metrics in v_metrics_per_ont.items():
+                    if "loss" in ont_metrics:
+                        val_log[f"{val_metric_prefix}/{ont}/loss_epoch"] = ont_metrics[
+                            "loss"
+                        ]
+                    for metric_name in _GO_DETAIL_METRIC_NAMES:
+                        if metric_name in ont_metrics:
+                            val_log[f"{val_metric_prefix}/{ont}/{metric_name}_epoch"] = (
+                                ont_metrics[metric_name]
+                            )
+                wandb.log(val_log)
+                print(
+                    f"[Phase0] Val epoch loss: {v_loss:.4f} | "
+                    f"Val MRR: {v_metrics.get('MRR', 0.0):.4f}"
                 )
-                print(f"[Phase0] Val mean loss: {v_loss:.4f}")
 
         if protein_to_split and test_loaders:
-            t_loss = _mean_eval_loss_for_loaders(
-                model, test_loaders, device, cfg.go_margin, active_ontologies
+            t_metrics, t_metrics_per_ont = _mean_eval_loss_for_loaders(
+                model,
+                test_loaders,
+                device,
+                cfg.go_margin,
+                active_ontologies,
+                metric_prefix=test_metric_prefix,
             )
+            t_loss = t_metrics.get("loss")
             if t_loss is not None:
-                wandb.log(
-                    {"phase0/test/mean_loss": t_loss, "phase0/epoch": epoch + 1}
+                test_log = {f"{test_metric_prefix}/loss_epoch": t_loss}
+                for metric_name in _GO_DETAIL_METRIC_NAMES:
+                    if metric_name in t_metrics:
+                        test_log[f"{test_metric_prefix}/{metric_name}_epoch"] = t_metrics[
+                            metric_name
+                        ]
+                for ont, ont_metrics in t_metrics_per_ont.items():
+                    if "loss" in ont_metrics:
+                        test_log[f"{test_metric_prefix}/{ont}/loss_epoch"] = ont_metrics[
+                            "loss"
+                        ]
+                    for metric_name in _GO_DETAIL_METRIC_NAMES:
+                        if metric_name in ont_metrics:
+                            test_log[f"{test_metric_prefix}/{ont}/{metric_name}_epoch"] = (
+                                ont_metrics[metric_name]
+                            )
+                wandb.log(test_log)
+                print(
+                    f"[Phase0] Test epoch loss: {t_loss:.4f} | "
+                    f"Test MRR: {t_metrics.get('MRR', 0.0):.4f}"
                 )
-                print(f"[Phase0] Test mean loss: {t_loss:.4f}")
 
         selection_metric = v_loss if v_loss is not None else avg_loss
-        selection_metric_name = "val_mean_loss" if v_loss is not None else "train_loss"
+        selection_metric_name = "val_loss_epoch" if v_loss is not None else "train_loss_epoch"
         if selection_metric < best_metric:
             best_metric = selection_metric
             best_epoch = epoch + 1
@@ -490,9 +626,9 @@ def run_go_pretraining(model, cfg: ProjectConfig, device: torch.device):
 
         wandb.log(
             {
-                "phase0/best_epoch_so_far": best_epoch if best_epoch is not None else 0,
-                "phase0/best_metric_so_far": best_metric,
-                "phase0/selection_metric": selection_metric,
+                f"{train_metric_prefix}/best_epoch_so_far": best_epoch if best_epoch is not None else 0,
+                f"{train_metric_prefix}/best_metric_so_far": best_metric,
+                f"{train_metric_prefix}/selection_metric": selection_metric,
             }
         )
 
