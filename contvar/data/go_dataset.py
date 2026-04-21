@@ -1,6 +1,6 @@
 import os
 import random
-from typing import Dict, List, Tuple, Optional, Literal
+from typing import Dict, List, Tuple, Optional, Literal, Set
 
 import torch
 from torch.utils.data import Dataset
@@ -26,6 +26,10 @@ class GOSemanticTripletDataset(Dataset):
     """
 
     _global_pt_path_index: Dict[str, Dict[str, str]] = {}
+    _global_pt_issue_messages: Dict[str, str] = {}
+    _global_reported_pt_issues: Set[str] = set()
+    _max_example_ids_to_print = 10
+    _max_runtime_issue_examples = 3
 
     @classmethod
     def warm_prebuilt_index(cls, prebuilt_graph_root: str) -> int:
@@ -107,6 +111,7 @@ class GOSemanticTripletDataset(Dataset):
 
         before = len(self.triplets)
         available_ids = self._get_available_prebuilt_ids()
+        missing_ids = self._collect_missing_prebuilt_ids(self.triplets, available_ids)
         self.triplets = [
             (a, p, n)
             for (a, p, n) in self.triplets
@@ -114,6 +119,17 @@ class GOSemanticTripletDataset(Dataset):
             and p.lower() in available_ids
             and n.lower() in available_ids
         ]
+        if missing_ids:
+            example_ids = ", ".join(
+                missing_ids[: self._max_example_ids_to_print]
+            )
+            remaining = len(missing_ids) - self._max_example_ids_to_print
+            more_suffix = f" (+{remaining} more)" if remaining > 0 else ""
+            print(
+                f"[GO-{self.ontology}] Missing prebuilt .pt graphs for "
+                f"{len(missing_ids):,} proteins; triplets containing them were dropped. "
+                f"Examples: {example_ids}{more_suffix}"
+            )
         print(
             f"[GO-{self.ontology}] Prebuilt .pt filter: "
             f"{before:,} -> {len(self.triplets):,} triplets "
@@ -211,6 +227,42 @@ class GOSemanticTripletDataset(Dataset):
             index = self.__class__._global_pt_path_index.get(root_key, {})
         return set(index.keys())
 
+    def _collect_missing_prebuilt_ids(
+        self, triplets: List[Tuple[str, str, str]], available_ids: set
+    ) -> List[str]:
+        missing_ids: List[str] = []
+        seen_missing: Set[str] = set()
+        for anchor_id, pos_id, neg_id in triplets:
+            for protein_id in (anchor_id, pos_id, neg_id):
+                protein_id_lower = protein_id.lower()
+                if protein_id_lower in available_ids or protein_id_lower in seen_missing:
+                    continue
+                seen_missing.add(protein_id_lower)
+                missing_ids.append(str(protein_id).upper())
+        return missing_ids
+
+    @classmethod
+    def _remember_pt_issue(cls, prebuilt_path: str, issue_message: str):
+        if prebuilt_path not in cls._global_pt_issue_messages:
+            cls._global_pt_issue_messages[prebuilt_path] = issue_message
+        if prebuilt_path in cls._global_reported_pt_issues:
+            return
+        cls._global_reported_pt_issues.add(prebuilt_path)
+        print(
+            f"[GO-phase0] Problem loading prebuilt graph {prebuilt_path}: "
+            f"{cls._global_pt_issue_messages[prebuilt_path]}"
+        )
+
+    def _describe_graph_issue(self, protein_id: str) -> Optional[str]:
+        prebuilt_path = self._id_to_prebuilt_graph_path(protein_id)
+        if prebuilt_path is None:
+            return f"{protein_id}: no indexed .pt file"
+
+        issue_message = self.__class__._global_pt_issue_messages.get(prebuilt_path)
+        if issue_message:
+            return f"{protein_id}: {issue_message} ({prebuilt_path})"
+        return f"{protein_id}: indexed at {prebuilt_path} but could not be loaded"
+
     def _load_prebuilt_graph(self, protein_id: str) -> Optional[Data]:
         prebuilt_path = self._id_to_prebuilt_graph_path(protein_id)
         if prebuilt_path is None:
@@ -219,8 +271,16 @@ class GOSemanticTripletDataset(Dataset):
             data = torch.load(prebuilt_path, weights_only=False)
             if isinstance(data, Data):
                 return data
+            self._remember_pt_issue(
+                prebuilt_path,
+                f"expected torch_geometric.data.Data, got {type(data).__name__}",
+            )
             return None
-        except Exception:
+        except Exception as exc:
+            self._remember_pt_issue(
+                prebuilt_path,
+                f"{type(exc).__name__}: {exc}",
+            )
             return None
 
     def _get_graph(self, protein_id: str) -> Optional[Data]:
@@ -237,6 +297,8 @@ class GOSemanticTripletDataset(Dataset):
 
     def __getitem__(self, idx: int):
         max_attempts = 20
+        attempted_issues: List[str] = []
+        seen_issues: Set[str] = set()
         for _ in range(max_attempts):
             anchor_id, pos_id, neg_id = self.triplets[idx]
 
@@ -247,9 +309,33 @@ class GOSemanticTripletDataset(Dataset):
             if g_a is not None and g_p is not None and g_n is not None:
                 return g_a, g_p, g_n
 
+            for protein_id, graph_obj in (
+                (anchor_id, g_a),
+                (pos_id, g_p),
+                (neg_id, g_n),
+            ):
+                if graph_obj is not None:
+                    continue
+                issue = self._describe_graph_issue(protein_id)
+                if issue and issue not in seen_issues:
+                    seen_issues.add(issue)
+                    attempted_issues.append(issue)
+
             idx = random.randint(0, len(self.triplets) - 1)
 
+        issue_summary = ""
+        if attempted_issues:
+            examples = attempted_issues[: self._max_runtime_issue_examples]
+            remaining = len(attempted_issues) - len(examples)
+            more_suffix = f" (+{remaining} more)" if remaining > 0 else ""
+            issue_summary = (
+                " Recent graph issues: "
+                + "; ".join(examples)
+                + more_suffix
+                + "."
+            )
         raise RuntimeError(
             f"[GO-{self.ontology}] Failed to load .pt graphs after {max_attempts} attempts. "
             f"Check prebuilt files for IDs in {self.tsv_path} under {self.prebuilt_graph_root}."
+            f"{issue_summary}"
         )

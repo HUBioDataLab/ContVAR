@@ -7,6 +7,7 @@ _REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 # This is the single place where the application paths live.
 # Edit these to point to your local files. The paths will be normalized to absolute paths before use.
+# But you can also use absolute paths directly.
 #
 # - `protein_triplets_data/`
 # - `embeddings_variable.h5`
