@@ -1,11 +1,10 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import roc_auc_score
 
 
-def compute_detailed_metrics(anchor_embed, pos_embed, neg_embed, top_k=[1, 5]):
-    """Compute retrieval, classification, alignment and uniformity metrics."""
+def compute_detailed_metrics(anchor_embed, pos_embed, neg_embed):
+    """Compute retrieval, alignment and uniformity metrics."""
     metrics = {}
     batch_size = anchor_embed.size(0)
 
@@ -26,32 +25,13 @@ def compute_detailed_metrics(anchor_embed, pos_embed, neg_embed, top_k=[1, 5]):
     dists = torch.cdist(anchor_embed, candidates, p=2)
 
     total_mrr = 0
-    total_recall = {k: 0 for k in top_k}
-
     for i in range(batch_size):
         target_idx = i
         sorted_indices = torch.argsort(dists[i], descending=False)
         rank = (sorted_indices == target_idx).nonzero(as_tuple=True)[0].item() + 1
         total_mrr += 1.0 / rank
-        for k in top_k:
-            if rank <= k:
-                total_recall[k] += 1
 
     metrics["MRR"] = total_mrr / batch_size
-    for k in top_k:
-        metrics[f"R@{k}"] = total_recall[k] / batch_size
-
-    # CLASSIFICATION METRICS
-    d_pos = F.pairwise_distance(anchor_embed, pos_embed)
-    d_neg = F.pairwise_distance(anchor_embed, neg_embed)
-    metrics["Simple_Acc"] = (d_pos < d_neg).float().mean().item()
-
-    y_true = np.concatenate([np.zeros(len(d_pos)), np.ones(len(d_neg))])
-    y_scores = np.concatenate([d_pos.detach().cpu().numpy(), d_neg.detach().cpu().numpy()])
-    try:
-        metrics["AUROC"] = roc_auc_score(y_true, y_scores)
-    except ValueError:
-        metrics["AUROC"] = 0.5
 
     return metrics
 

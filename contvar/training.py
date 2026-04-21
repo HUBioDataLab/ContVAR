@@ -45,7 +45,7 @@ def evaluate(model, loader, criterion, device, margin=0.3):
     model.eval()
     total_loss = 0
     total_loss_g = 0
-    total_loss_l = 0
+    total_loss_local = 0
     valid_batches = 0
     all_metrics = []
 
@@ -99,14 +99,13 @@ def evaluate(model, loader, criterion, device, margin=0.3):
 
             total_loss += loss.item()
             total_loss_g += loss_g.item()
-            total_loss_l += loss_l.item()
+            total_loss_local += loss_l.item()
             valid_batches += 1
 
-            k_vals = [1, 5] if len(ea_g) >= 5 else [1]
-            batch_metrics = compute_detailed_metrics(ea_g, ep_g, en_neg, top_k=k_vals)
+            batch_metrics = compute_detailed_metrics(ea_g, ep_g, en_neg)
             batch_metrics["loss"] = loss.item()
-            batch_metrics["loss_g"] = loss_g.item()
-            batch_metrics["loss_l"] = loss_l.item()
+            batch_metrics["loss_global"] = loss_g.item()
+            batch_metrics["loss_local"] = loss_l.item()
             all_metrics.append(batch_metrics)
 
     avg_loss = total_loss / valid_batches if valid_batches > 0 else 0
@@ -308,7 +307,7 @@ def train_pipeline(config=None, force=False, data_root=None,
         model.train()
         total_loss = 0
         total_loss_g = 0
-        total_loss_l = 0
+        total_loss_local = 0
         valid_batches = 0
         train_metrics_list = []
 
@@ -407,57 +406,40 @@ def train_pipeline(config=None, force=False, data_root=None,
                 optimizer.zero_grad()
 
             with torch.no_grad():
-                k_vals = [1, 5] if current_batch_size >= 5 else [1]
-                batch_metrics = compute_detailed_metrics(ea_g, ep_g, en_neg, top_k=k_vals)
+                batch_metrics = compute_detailed_metrics(ea_g, ep_g, en_neg)
                 dist_pos = F.pairwise_distance(ea_g, ep_g)
                 train_metrics_list.append(batch_metrics)
 
-            log_payload = {
+            batch_log = {
                 "train/batch_loss": loss.item(),
-                "train/batch_loss_g": loss_g.item(),
-                "train/batch_loss_l": loss_l.item(),
-                "train/Uniformity": batch_metrics["Uniformity"],
+                "train/batch_loss_global": loss_g.item(),
+                "train/batch_loss_local": loss_l.item(),
+                "train/Alignment_batch": batch_metrics["Alignment"],
+                "train/MRR_batch": batch_metrics["MRR"],
+                "train/Uniformity_batch": batch_metrics["Uniformity"],
                 "train/avg_pos_dist": dist_pos.mean().item(),
                 "train/avg_neg_dist": neg_dist.mean().item(),
                 "train/dist_margin": (neg_dist.mean() - dist_pos.mean()).item(),
-                "train/batch_size": current_batch_size,
-                "train/avg_pos_dist_l": d_pos_l.mean().item(),
-                "train/avg_neg_dist_l": d_neg_l.mean().item(),
-                "train/dist_margin_l": (d_neg_l.mean() - d_pos_l.mean()).item(),
+                "train/avg_pos_dist_local": d_pos_l.mean().item(),
+                "train/avg_neg_dist_local": d_neg_l.mean().item(),
+                "train/dist_margin_local": (d_neg_l.mean() - d_pos_l.mean()).item(),
+                
                 "local/batch_easy": batch_local_easy,
                 "local/batch_semi_hard": batch_local_semi,
                 "local/batch_hard": batch_local_hard,
             }
 
             if streaming_info is not None:
-                log_payload["mining/batch_hard_count"] = streaming_info["streaming_hard"]
-                log_payload["mining/batch_semi_hard_count"] = streaming_info["streaming_semi_hard"]
-                log_payload["mining/batch_total_evaluated"] = streaming_info["total_evaluated"]
-                log_payload["mining/batch_total_qualifying"] = streaming_info["total_qualifying"]
-                log_payload["mining/batch_qualifying_ratio"] = (
+                batch_log["mining/batch_hard_count"] = streaming_info["streaming_hard"]
+                batch_log["mining/batch_semi_hard_count"] = streaming_info["streaming_semi_hard"]
+                batch_log["mining/batch_total_evaluated"] = streaming_info["total_evaluated"]
+                batch_log["mining/batch_total_qualifying"] = streaming_info["total_qualifying"]
+                batch_log["mining/batch_qualifying_ratio"] = (
                     streaming_info["total_qualifying"] / streaming_info["total_evaluated"]
                     if streaming_info["total_evaluated"] > 0 else 0
                 )
 
-            if epoch < 2:
-                log_payload.update({
-                    "step/batch_loss": loss.item(),
-                    "step/Alignment": batch_metrics["Alignment"],
-                    "step/Uniformity": batch_metrics["Uniformity"],
-                    "step/avg_pos_dist": dist_pos.mean().item(),
-                    "step/avg_neg_dist": neg_dist.mean().item(),
-                    "step/dist_margin": (neg_dist.mean() - dist_pos.mean()).item(),
-                    "step/AUROC": batch_metrics["AUROC"],
-                    "step/Simple_Acc": batch_metrics["Simple_Acc"],
-                    "step/MRR": batch_metrics["MRR"],
-                    "step/R@1": batch_metrics["R@1"],
-                    "step/epoch": epoch + 1,
-                    "step/batch_idx": valid_batches,
-                })
-                if "R@5" in batch_metrics:
-                    log_payload["step/R@5"] = batch_metrics["R@5"]
-
-            wandb.log(log_payload)
+            wandb.log(batch_log)
 
             if streaming_info is not None:
                 epoch_streaming_hard_total += streaming_info["streaming_hard"]
@@ -467,11 +449,11 @@ def train_pipeline(config=None, force=False, data_root=None,
 
             total_loss += loss.item()
             total_loss_g += loss_g.item()
-            total_loss_l += loss_l.item()
+            total_loss_local += loss_l.item()
             valid_batches += 1
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
-                'auc': f'{batch_metrics["AUROC"]:.3f}',
+                'mrr': f'{batch_metrics["MRR"]:.3f}',
             })
 
         # Flush remaining accumulated gradients at end of epoch
@@ -482,7 +464,7 @@ def train_pipeline(config=None, force=False, data_root=None,
 
         avg_train_loss = total_loss / valid_batches if valid_batches > 0 else 0
         avg_train_loss_g = total_loss_g / valid_batches if valid_batches > 0 else 0
-        avg_train_loss_l = total_loss_l / valid_batches if valid_batches > 0 else 0
+        avg_train_loss_local = total_loss_local / valid_batches if valid_batches > 0 else 0
         epoch_duration_sec = time.time() - epoch_start
 
         train_epoch_metrics = {}
@@ -499,45 +481,42 @@ def train_pipeline(config=None, force=False, data_root=None,
         embedding_stats = compute_embedding_stats(
             model, val_loader, device, val_criterion, max_batches=20
         )
-        log_dict = {
+        epoch_log = {
             "train/epoch_loss": avg_train_loss,
-            "train/epoch_loss_g": avg_train_loss_g,
-            "train/epoch_loss_l": avg_train_loss_l,
-            "train/epoch_AUROC": train_epoch_metrics.get("AUROC", 0),
-            "train/epoch_Simple_Acc": train_epoch_metrics.get("Simple_Acc", 0),
+            "train/epoch_loss_global": avg_train_loss_g,
+            "train/epoch_loss_local": avg_train_loss_local,
+            "train/epoch_Alignment": train_epoch_metrics.get("Alignment", 0),
             "train/epoch_MRR": train_epoch_metrics.get("MRR", 0),
+            "train/epoch_Uniformity": train_epoch_metrics.get("Uniformity", 0),
+            "train/epoch_duration_sec": epoch_duration_sec,
+
             "val/loss": val_metrics.get("loss", 0),
-            "val/loss_g": val_metrics.get("loss_g", 0),
-            "val/loss_l": val_metrics.get("loss_l", 0),
-            "val/AUROC": val_metrics.get("AUROC", 0),
-            "val/Simple_Acc": val_metrics.get("Simple_Acc", 0),
+            "val/loss_global": val_metrics.get("loss_global", 0),
+            "val/loss_local": val_metrics.get("loss_local", 0),
             "val/MRR": val_metrics.get("MRR", 0),
-            "val/R@1": val_metrics.get("R@1", 0),
             "val/Alignment": val_metrics.get("Alignment", 0),
             "val/Uniformity": val_metrics.get("Uniformity", 0),
-            "train/epoch_duration_sec": epoch_duration_sec,
-            "train/epoch_overfit_gap": val_metrics.get("loss", 0) - avg_train_loss,
-            "train/epoch_num_batches": valid_batches,
+
         }
 
         for k, v in embedding_stats.items():
-            log_dict[f"embedding_stats/{k}"] = v
+            epoch_log[f"embedding_stats/{k}"] = v
 
-        log_dict["mining/epoch_hard_total"] = epoch_streaming_hard_total
-        log_dict["mining/epoch_semi_hard_total"] = epoch_streaming_semi_hard_total
-        log_dict["mining/epoch_total_evaluated"] = epoch_streaming_evaluated_total
-        log_dict["mining/epoch_total_qualifying"] = epoch_streaming_qualifying_total
-        log_dict["mining/epoch_qualifying_ratio"] = (
+        epoch_log["mining/epoch_hard_total"] = epoch_streaming_hard_total
+        epoch_log["mining/epoch_semi_hard_total"] = epoch_streaming_semi_hard_total
+        epoch_log["mining/epoch_total_evaluated"] = epoch_streaming_evaluated_total
+        epoch_log["mining/epoch_total_qualifying"] = epoch_streaming_qualifying_total
+        epoch_log["mining/epoch_qualifying_ratio"] = (
             epoch_streaming_qualifying_total / epoch_streaming_evaluated_total
             if epoch_streaming_evaluated_total > 0 else 0
         )
-        log_dict["mining/epoch_easy_total"] = (
+        epoch_log["mining/epoch_easy_total"] = (
             epoch_streaming_evaluated_total - epoch_streaming_qualifying_total
         )
 
-        log_dict["local/epoch_easy_total"] = epoch_local_easy_total
-        log_dict["local/epoch_semi_hard_total"] = epoch_local_semi_hard_total
-        log_dict["local/epoch_hard_total"] = epoch_local_hard_total
+        epoch_log["local/epoch_easy_total"] = epoch_local_easy_total
+        epoch_log["local/epoch_semi_hard_total"] = epoch_local_semi_hard_total
+        epoch_log["local/epoch_hard_total"] = epoch_local_hard_total
 
         # Save best model
         if val_metrics.get("loss", float('inf')) < best_val_loss:
@@ -553,16 +532,16 @@ def train_pipeline(config=None, force=False, data_root=None,
             )
             artifact.add_file(model_name)
             wandb.log_artifact(artifact)
-            log_dict["best_model_saved"] = True
-        log_dict["val/best_loss_so_far"] = best_val_loss
-        log_dict["val/best_epoch_so_far"] = best_epoch if best_epoch is not None else 0
+            epoch_log["best_model_saved"] = True
+        epoch_log["val/best_loss_so_far"] = best_val_loss
+        epoch_log["val/best_epoch_so_far"] = best_epoch if best_epoch is not None else 0
 
-        wandb.log(log_dict)
+        wandb.log(epoch_log)
 
-        saved_str = "(Saved)" if log_dict.get("best_model_saved") else ""
+        saved_str = "(Saved)" if epoch_log.get("best_model_saved") else ""
         print(f"[Stage2] Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | "
               f"Val Loss: {val_metrics.get('loss', 0):.4f} | "
-              f"Val AUROC: {val_metrics.get('AUROC', 0):.4f} | "
+              f"Val MRR: {val_metrics.get('MRR', 0):.4f} | "
               f"Local[E:{epoch_local_easy_total} S:{epoch_local_semi_hard_total} H:{epoch_local_hard_total}] "
               f"{saved_str}")
 
@@ -578,21 +557,15 @@ def train_pipeline(config=None, force=False, data_root=None,
         final_log = {
             "best/epoch": best_epoch,
             "best/val_loss": best_val_metrics.get("loss", 0),
-            "best/val_loss_g": best_val_metrics.get("loss_g", 0),
-            "best/val_loss_l": best_val_metrics.get("loss_l", 0),
-            "best/val_AUROC": best_val_metrics.get("AUROC", 0),
-            "best/val_Simple_Acc": best_val_metrics.get("Simple_Acc", 0),
+            "best/val_loss_global": best_val_metrics.get("loss_global", 0),
+            "best/val_loss_local": best_val_metrics.get("loss_local", 0),
             "best/val_MRR": best_val_metrics.get("MRR", 0),
-            "best/val_R@1": best_val_metrics.get("R@1", 0),
             "best/val_Alignment": best_val_metrics.get("Alignment", 0),
             "best/val_Uniformity": best_val_metrics.get("Uniformity", 0),
             "best/test_loss": best_test_metrics.get("loss", 0),
-            "best/test_loss_g": best_test_metrics.get("loss_g", 0),
-            "best/test_loss_l": best_test_metrics.get("loss_l", 0),
-            "best/test_AUROC": best_test_metrics.get("AUROC", 0),
-            "best/test_Simple_Acc": best_test_metrics.get("Simple_Acc", 0),
+            "best/test_loss_global": best_test_metrics.get("loss_global", 0),
+            "best/test_loss_local": best_test_metrics.get("loss_local", 0),
             "best/test_MRR": best_test_metrics.get("MRR", 0),
-            "best/test_R@1": best_test_metrics.get("R@1", 0),
             "best/test_Alignment": best_test_metrics.get("Alignment", 0),
             "best/test_Uniformity": best_test_metrics.get("Uniformity", 0),
         }
@@ -603,12 +576,11 @@ def train_pipeline(config=None, force=False, data_root=None,
         print(f"[Stage2] Best checkpoint (epoch {best_epoch}) | "
               f"Val Loss: {best_val_metrics.get('loss', 0):.4f} | "
               f"Test Loss: {best_test_metrics.get('loss', 0):.4f} | "
-              f"Val AUROC: {best_val_metrics.get('AUROC', 0):.4f} | "
-              f"Test AUROC: {best_test_metrics.get('AUROC', 0):.4f}")
+              f"Val MRR: {best_val_metrics.get('MRR', 0):.4f} | "
+              f"Test MRR: {best_test_metrics.get('MRR', 0):.4f}")
     else:
         print("Warning: No best validation checkpoint was saved, so final test evaluation was skipped.")
 
     wandb.finish()
     print("\nTraining completed!")
     return model, mapper, processed_dir
-

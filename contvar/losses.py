@@ -84,6 +84,9 @@ class SemiHardMiningTripletLoss(nn.Module):
         # Pre-compute padding structure
         max_negs = neg_counts.max().item()
         neg_dists_padded = torch.full((batch_size, max_negs), float('inf'), device=device)
+        valid_neg_mask = (
+            torch.arange(max_negs, device=device).unsqueeze(0) < neg_counts.unsqueeze(1)
+        )
 
         # Build position indices within each sample
         cumsum = torch.cat([torch.tensor([0], device=device), neg_counts.cumsum(0)[:-1]])
@@ -100,19 +103,31 @@ class SemiHardMiningTripletLoss(nn.Module):
 
             qualifying_dists = torch.where(qualifying_padded, neg_dists_padded,
                                            torch.tensor(float('inf'), device=device))
+            qualifying_counts = qualifying_padded.sum(dim=1)
+            safe_qualifying_dists = torch.where(
+                qualifying_padded, neg_dists_padded, torch.zeros_like(neg_dists_padded)
+            )
+            avg_neg_dist = safe_qualifying_dists.sum(dim=1) / qualifying_counts.clamp(min=1)
 
-            qualifying_counts = qualifying_padded.sum(dim=1).clamp(min=1)
-            avg_neg_dist = (qualifying_dists * qualifying_padded.float()).sum(dim=1) / qualifying_counts
-
-            no_qualifying = qualifying_padded.sum(dim=1) == 0
+            no_qualifying = qualifying_counts == 0
             if no_qualifying.any():
-                min_dists, _ = neg_dists_padded.min(dim=1)
+                valid_neg_dists = torch.where(
+                    valid_neg_mask, neg_dists_padded, torch.tensor(float('inf'), device=device)
+                )
+                min_dists, min_indices = valid_neg_dists.min(dim=1)
                 avg_neg_dist = torch.where(no_qualifying, min_dists, avg_neg_dist)
+            else:
+                min_indices = None
 
             hardest_indices = qualifying_dists.argmin(dim=1)
+            if min_indices is not None:
+                hardest_indices = torch.where(no_qualifying, min_indices, hardest_indices)
 
         else:
-            min_neg_dist, hardest_indices = neg_dists_padded.min(dim=1)
+            valid_neg_dists = torch.where(
+                valid_neg_mask, neg_dists_padded, torch.tensor(float('inf'), device=device)
+            )
+            min_neg_dist, hardest_indices = valid_neg_dists.min(dim=1)
             loss = F.relu(pos_dist - min_neg_dist + self.margin).mean()
             avg_neg_dist = min_neg_dist
 
