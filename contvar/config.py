@@ -79,14 +79,14 @@ class ProjectConfig:
         self.num_workers = 8
 
         # Phase 0: GO semantic similarity pretraining
-        self.go_phase0_epochs = 2  # set >0 to enable (override in Colab if needed)
+        self.go_phase0_epochs = 200
         self.go_margin = 0.2
         self.go_batch_size = 8
         self.go_lr = 1e-4
         # Ontology sampling in phase-0 (GOAL2): use ratio-driven ontology picks.
         # Disable to preserve legacy behavior (one batch from each ontology per step).
         self.go_sampling_enabled = True
-        self.go_sampling_ratio = {"mf": 0.6, "bp": 0.2, "cc": 0.2}
+        self.go_sampling_ratio = {"mf": 0.7, "bp": 0.2, "cc": 0.1}
         self.go_log_sampling_stats = True
         # Loader settings for GO pretraining
         self.go_num_workers = 0  # DataLoader workers for GO (0 is safer on Colab)

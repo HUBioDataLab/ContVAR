@@ -34,7 +34,7 @@ STARTER_PATHS = {
     # Prebuilt GO pretraining graphs.
     "go_prebuilt_graph_root": None,
 
-    # This is allow to reuse previously saved weights of GO pretraining model by combining with go_phase0_epochs = 0. If None, phase-0 will start normally.
+    # Optional initialization checkpoint for GO phase-0 warm start.
     "go_phase0_init_checkpoint_path": None,
 
     # Paths for output models and visualizations.
@@ -94,6 +94,7 @@ def _resolve_paths():
 
 def _build_config_overrides(args, paths):
     overrides = {
+        "go_phase0_epochs": 200,
         "go_tsv_dir": paths["go_tsv_dir"],
         "go_prebuilt_graph_root": paths["go_prebuilt_graph_root"],
         "go_phase0_init_checkpoint_path": paths["go_phase0_init_checkpoint_path"],
@@ -107,9 +108,6 @@ def _build_config_overrides(args, paths):
         "dms_embeddings_export_path": paths["dms_embeddings_export_path"],
         "tsne_save_dir": paths["tsne_save_dir"],
     }
-
-    if not paths["go_prebuilt_graph_root"]:
-        overrides["go_phase0_epochs"] = 0
 
     return overrides
 
@@ -190,14 +188,6 @@ def main():
     config_overrides = _build_config_overrides(args, paths)
 
     _print_path_summary(paths, config_overrides)
-
-    if (
-        not paths["go_prebuilt_graph_root"]
-        and config_overrides.get("go_phase0_epochs") == 0
-    ):
-        print(
-            "\nGO phase-0 is disabled because no prebuilt GO graph directory was provided."
-        )
 
     from contvar.config import setup_environment
     from contvar.training import train_pipeline
