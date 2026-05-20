@@ -61,9 +61,22 @@ class ProjectConfig:
         self.output_dim = 256
         self.heads = 4
         self.lr = 1e-4
+        self.lr_scheduler = "warmup_cosine"
+        self.lr_warmup_epochs = 10
+        self.lr_warmup_start_factor = 0.1
+        self.lr_decay = 0.95  # Used only when lr_scheduler = "exponential"
+        self.min_lr = 1e-6
         self.weight_decay = 0.01
-        self.epochs = 200
-        self.margin = 0.3
+        self.epochs = 300
+        self.margin = 0.2
+
+        # DMS global pooling: keep the GO-pretrained mean-pooled path, then add
+        # a small mutation-aware attention correction when mutation positions
+        # are available. GO phase-0 calls the model without mut_pos, so it keeps
+        # using the original mean-pooled representation.
+        self.use_mutation_attention_pooling = True
+        self.mutation_attention_beta_init = 0.1
+        self.mutation_attention_distance_scale = 16.0
 
         # Loss Function Configuration
         self.loss_type = "semi_hard"
@@ -79,7 +92,7 @@ class ProjectConfig:
         self.num_workers = 8
 
         # Phase 0: GO semantic similarity pretraining
-        self.go_phase0_epochs = 200
+        self.go_phase0_epochs = 0
         self.go_margin = 0.2
         self.go_batch_size = 8
         self.go_lr = 1e-4
@@ -118,6 +131,11 @@ class ProjectConfig:
         )
         self.stage2_best_model_path = starter_paths.get("stage2_best_model_path")
         self.stage2_last_model_path = starter_paths.get("stage2_last_model_path")
+        self.stage2_epoch_checkpoint_template = starter_paths.get(
+            "stage2_epoch_checkpoint_template"
+        )
+        self.stage2_epoch_checkpoint_extra_epochs = (80,)
+        self.stage2_epoch_checkpoint_interval = 100
         self.tsne_save_dir = starter_paths.get("tsne_save_dir")
         self.go_split_seed = 42
 

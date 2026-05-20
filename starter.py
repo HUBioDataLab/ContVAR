@@ -32,7 +32,7 @@ STARTER_PATHS = {
     "go_tsv_dir": os.path.join(_REPO_ROOT, "semantic_similarity"),
 
     # Prebuilt GO pretraining graphs.
-    "go_prebuilt_graph_root": None,
+    "go_prebuilt_graph_root": os.path.join(_REPO_ROOT, "model_go_pretraining_best_loss.pt"),
 
     # Optional initialization checkpoint for GO phase-0 warm start.
     "go_phase0_init_checkpoint_path": None,
@@ -44,6 +44,9 @@ STARTER_PATHS = {
     "go_phase0_last_model_path": os.path.join(_REPO_ROOT, "model_phase0_last.pt"),
     "stage2_best_model_path": os.path.join(_REPO_ROOT, "model_best_loss.pt"),
     "stage2_last_model_path": os.path.join(_REPO_ROOT, "model_last.pt"),
+    "stage2_epoch_checkpoint_template": os.path.join(
+        _REPO_ROOT, "model_epoch_{epoch}.pt"
+    ),
     "phase0_embeddings_export_path": os.path.join(
         _REPO_ROOT, "exports", "phase0_contvar_embeddings.h5"
     ),
@@ -104,6 +107,9 @@ def _build_config_overrides(args, paths):
         "go_protein_split_json_path": paths["go_protein_split_json_path"],
         "stage2_best_model_path": paths["stage2_best_model_path"],
         "stage2_last_model_path": paths["stage2_last_model_path"],
+        "stage2_epoch_checkpoint_template": paths[
+            "stage2_epoch_checkpoint_template"
+        ],
         "phase0_embeddings_export_path": paths["phase0_embeddings_export_path"],
         "dms_embeddings_export_path": paths["dms_embeddings_export_path"],
         "tsne_save_dir": paths["tsne_save_dir"],
@@ -126,6 +132,7 @@ def _print_path_summary(paths, config_overrides):
         "go_phase0_last_model_path",
         "stage2_best_model_path",
         "stage2_last_model_path",
+        "stage2_epoch_checkpoint_template",
         "phase0_embeddings_export_path",
         "dms_embeddings_export_path",
         "tsne_save_dir",

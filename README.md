@@ -88,6 +88,7 @@ By default, local runs write:
 
 - `model_best_loss.pt`
 - `model_last.pt`
+- `model_epoch_80.pt`, `model_epoch_100.pt`, `model_epoch_200.pt`, ... during DMS training
 - `exports/dms_variant_contvar_embeddings.h5`
 - `model_phase0_best_loss.pt` when GO phase-0 is enabled
 - `model_phase0_last.pt` when GO phase-0 is enabled

@@ -20,6 +20,7 @@ contvar_v0.ipynb
 sequence_model/
 requirements.txt
 validation (1).py
+model_go_pretraining_best_loss.pt
 
 # Large semantic similarity TSVs (kept local, not tracked)
 semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv
