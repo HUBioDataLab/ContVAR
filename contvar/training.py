@@ -29,6 +29,11 @@ def _load_model_checkpoint(model, checkpoint_path, device, strict=True):
         state_dict = checkpoint["model_state_dict"]
     else:
         state_dict = checkpoint
+    state_dict = {
+        key: value
+        for key, value in state_dict.items()
+        if not key.startswith("mutation_attention_")
+    }
     incompatible = model.load_state_dict(state_dict, strict=strict)
     if not strict:
         missing = list(incompatible.missing_keys)
@@ -260,11 +265,7 @@ def train_pipeline(config=None, force=False, data_root=None,
     print(f"Gradient Accumulation: {cfg.grad_accumulation_steps} steps (effective batch = {cfg.mining_batch_size * cfg.grad_accumulation_steps})")
     print(f"Eval Batch Size: {cfg.eval_batch_size}")
     print(f"Local Loss: Contrastive (attract good / repel bad at mutation position)")
-    print(
-        "Mutation-aware global pooling: "
-        f"{getattr(cfg, 'use_mutation_attention_pooling', True)} "
-        f"(beta_init={getattr(cfg, 'mutation_attention_beta_init', 0.1)})"
-    )
+    print("Global Pooling: global_mean_pool")
     print(f"DMS protein split: {cfg.dms_protein_split_json_path}")
     print(f"Stage-2 best checkpoint: {cfg.stage2_best_model_path}")
     print(f"Stage-2 last checkpoint: {cfg.stage2_last_model_path}")
@@ -287,15 +288,6 @@ def train_pipeline(config=None, force=False, data_root=None,
         output_dim=cfg.output_dim,
         heads=cfg.heads,
         edge_dim=cfg.edge_attr_dim,
-        use_mutation_attention_pooling=getattr(
-            cfg, "use_mutation_attention_pooling", True
-        ),
-        mutation_attention_beta_init=getattr(
-            cfg, "mutation_attention_beta_init", 0.1
-        ),
-        mutation_attention_distance_scale=getattr(
-            cfg, "mutation_attention_distance_scale", 16.0
-        ),
     ).to(device)
 
     init_checkpoint_path = getattr(cfg, "go_phase0_init_checkpoint_path", None)

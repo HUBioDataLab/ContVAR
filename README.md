@@ -82,6 +82,37 @@ python starter.py
 
 - `--force`: rebuild processed protein graphs from scratch
 
+## Frozen-model inference
+
+To create embeddings from already-built PyG graph `.pt` files without running
+training, use the inference module. It loads a frozen ContVAR checkpoint and
+exports one normalized global graph embedding per input graph.
+
+```bash
+python -m contvar.inference \
+  --checkpoint model_best_loss.pt \
+  --graph-root path/to/prebuilt_graphs \
+  --out exports/inference_contvar_embeddings.h5 \
+  --batch-size 32
+```
+
+The inference path uses `global_mean_pool` over the GNN node features.
+
+Notebook usage:
+
+```python
+from contvar.inference import collect_graph_paths, export_batch_embeddings
+
+graph_paths = collect_graph_paths("/content/ContVAR/prebuilt_graphs")
+export_batch_embeddings(
+    checkpoint_path="/content/ContVAR/model_best_loss.pt",
+    graph_paths=graph_paths,
+    out_path="/content/ContVAR/exports/inference_contvar_embeddings.h5",
+    batch_size=32,
+    device="auto",
+)
+```
+
 ## Output files
 
 By default, local runs write:

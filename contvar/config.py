@@ -70,14 +70,6 @@ class ProjectConfig:
         self.epochs = 300
         self.margin = 0.2
 
-        # DMS global pooling: keep the GO-pretrained mean-pooled path, then add
-        # a small mutation-aware attention correction when mutation positions
-        # are available. GO phase-0 calls the model without mut_pos, so it keeps
-        # using the original mean-pooled representation.
-        self.use_mutation_attention_pooling = True
-        self.mutation_attention_beta_init = 0.1
-        self.mutation_attention_distance_scale = 16.0
-
         # Loss Function Configuration
         self.loss_type = "semi_hard"
         self.max_negatives = 10

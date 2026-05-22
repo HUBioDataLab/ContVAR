@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATv2Conv, global_add_pool, global_mean_pool
-from torch_geometric.utils import softmax
+from torch_geometric.nn import GATv2Conv, global_mean_pool
 
 
 class DeepProteinGAT(nn.Module):
@@ -15,15 +14,10 @@ class DeepProteinGAT(nn.Module):
     """
 
     def __init__(self, input_dim, hidden_dim, output_dim, heads=4,
-                 edge_dim=20, projection_hidden_dim=None,
-                 use_mutation_attention_pooling=True,
-                 mutation_attention_beta_init=0.1,
-                 mutation_attention_distance_scale=16.0):
+                 edge_dim=20, projection_hidden_dim=None):
         super().__init__()
 
         self.edge_dim = edge_dim
-        self.use_mutation_attention_pooling = use_mutation_attention_pooling
-        self.mutation_attention_distance_scale = mutation_attention_distance_scale
         conv_out_dim = hidden_dim * heads
 
         if projection_hidden_dim is None:
@@ -60,17 +54,6 @@ class DeepProteinGAT(nn.Module):
             nn.Linear(conv_out_dim, projection_hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(projection_hidden_dim, output_dim),
-        )
-
-        # DMS-only correction branch. It is inactive when mut_pos is not passed,
-        # so mean-pooled GO pretraining checkpoints can still seed the model.
-        self.mutation_attention_score = nn.Sequential(
-            nn.Linear(conv_out_dim + 3, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, 1),
-        )
-        self.mutation_attention_beta = nn.Parameter(
-            torch.tensor(float(mutation_attention_beta_init))
         )
 
         # Optional GO heads for phase-0 semantic pretraining
@@ -124,51 +107,11 @@ class DeepProteinGAT(nn.Module):
         res_num = data.residue_number.to(x.device) if hasattr(data, 'residue_number') and data.residue_number is not None else None
         return x, batch, res_num
 
-    def _global_embedding(self, x, batch, res_num=None, mut_pos=None):
-        """Mean-pooled global embedding plus optional mutation-aware correction."""
+    def _global_embedding(self, x, batch):
+        """Mean-pooled global graph embedding."""
         x_mean = global_mean_pool(x, batch)
-        z_mean = self.projection(x_mean)
-        z_mean = F.normalize(z_mean, p=2, dim=1)
-
-        if (
-            not self.use_mutation_attention_pooling
-            or mut_pos is None
-            or res_num is None
-        ):
-            return z_mean
-
-        x_attn = self._mutation_attention_pool(x, batch, res_num, mut_pos)
-        z_attn = self.projection(x_attn)
-        z_attn = F.normalize(z_attn, p=2, dim=1)
-        z_global = z_mean + self.mutation_attention_beta * z_attn
+        z_global = self.projection(x_mean)
         return F.normalize(z_global, p=2, dim=1)
-
-    def _mutation_attention_pool(self, x, batch, res_num, mut_pos):
-        """
-        Learn residue weights conditioned on sequence distance to the mutation.
-
-        Invalid mutation positions fall back to uniform attention, which is
-        equivalent to mean pooling for that graph.
-        """
-        device = x.device
-        mut_pos = mut_pos.to(device)
-        graph_mut_pos = mut_pos[batch]
-        valid_mut = graph_mut_pos >= 0
-
-        dist = (res_num.float() - graph_mut_pos.float()).abs()
-        dist = torch.where(valid_mut, dist, torch.zeros_like(dist))
-
-        scale = max(float(self.mutation_attention_distance_scale), 1.0)
-        is_mut_site = ((dist == 0) & valid_mut).float()
-        proximity = torch.where(valid_mut, 1.0 / (1.0 + dist), torch.ones_like(dist))
-        scaled_dist = torch.clamp(dist / scale, max=1.0)
-        mut_features = torch.stack([is_mut_site, proximity, scaled_dist], dim=1)
-
-        scores = self.mutation_attention_score(torch.cat([x, mut_features], dim=1))
-        scores = scores.squeeze(-1)
-        scores = torch.where(valid_mut, scores, torch.zeros_like(scores))
-        weights = softmax(scores, batch).unsqueeze(-1)
-        return global_add_pool(weights * x, batch)
 
     def _extract_local(self, x, batch, res_num, mut_pos):
         """Extract local embeddings at given positions from pre-computed node features.
@@ -193,7 +136,7 @@ class DeepProteinGAT(nn.Module):
         x, batch, res_num = self._gnn_forward(data)
 
         # Global embedding
-        x_global = self._global_embedding(x, batch, res_num, mut_pos)
+        x_global = self._global_embedding(x, batch)
 
         # Local: embedding at mut_pos per graph (fallback to graph mean if position missing)
         if mut_pos is not None and res_num is not None:
@@ -211,7 +154,7 @@ class DeepProteinGAT(nn.Module):
         """
         x, batch, res_num = self._gnn_forward(data)
 
-        x_global = self._global_embedding(x, batch, res_num, mut_pos)
+        x_global = self._global_embedding(x, batch)
 
         if mut_pos is not None and res_num is not None:
             x_local = self._extract_local(x, batch, res_num, mut_pos)

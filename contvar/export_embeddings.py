@@ -11,7 +11,6 @@ from torch_geometric.data import Batch
 from tqdm import tqdm
 
 from contvar.config import ProjectConfig, ensure_dms_triplets_unzipped
-from contvar.data.collate import parse_mut_pos_from_path
 from contvar.data.dataset import TripletProteinGraphDataset
 from contvar.data.mapper import TripletDataPathMapper
 from contvar.utils import load_all_embeddings
@@ -37,7 +36,6 @@ def _write_embeddings(
     out_path: str,
     batch_size: int,
     loader: Callable[[str], object],
-    mut_pos_getter: Optional[Callable[[str], Optional[int]]] = None,
 ) -> None:
     _ensure_parent_dir(out_path)
     total_batches = (len(entries) + batch_size - 1) // batch_size
@@ -51,19 +49,7 @@ def _write_embeddings(
             data_list = [loader(source) for _, source in chunk]
             batch = Batch.from_data_list(list(data_list)).to(device)
             with torch.no_grad():
-                if mut_pos_getter is None:
-                    z_global, _ = model(batch)
-                else:
-                    mut_pos = [
-                        mut_pos_getter(source)
-                        for _, source in chunk
-                    ]
-                    mut_pos = torch.tensor(
-                        [p if p is not None else -1 for p in mut_pos],
-                        dtype=torch.long,
-                        device=device,
-                    )
-                    z_global, _ = model(batch, mut_pos=mut_pos)
+                z_global, _ = model(batch)
             emb_np = z_global.detach().cpu().numpy().astype(np.float32, copy=False)
             for key, emb in zip(keys, emb_np):
                 h5f.create_dataset(key, data=emb, compression="gzip")
@@ -246,7 +232,6 @@ def export_dms_embeddings(
         out_path,
         batch_size,
         loader=lambda path: torch.load(path, weights_only=False),
-        mut_pos_getter=parse_mut_pos_from_path,
     )
 
 

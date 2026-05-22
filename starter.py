@@ -3,6 +3,8 @@
 import argparse
 import os
 
+import torch
+
 _REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 # This is the single place where the application paths live.
@@ -177,14 +179,39 @@ def _run_post_training_exports(model, mapper, processed_dir, config_overrides, p
     )
 
     print("\n=== Post-Training Visualization ===")
+    best_tsne_dir = os.path.join(paths["tsne_save_dir"], "best")
+    last_tsne_dir = os.path.join(paths["tsne_save_dir"], "last")
+
+    best_model_path = paths.get("stage2_best_model_path")
+    if best_model_path and os.path.exists(best_model_path):
+        print(f"[t-SNE] Loading best checkpoint: {best_model_path}")
+        model.load_state_dict(torch.load(best_model_path, map_location=env["device"]))
+
+    print("[t-SNE] Generating visualization for best checkpoint...")
     visualize_tsne(
         model=model,
         mapper=mapper,
         processed_dir=processed_dir,
         split="val",
         device=env["device"],
-        save_dir=paths["tsne_save_dir"],
+        save_dir=best_tsne_dir,
     )
+
+    last_model_path = paths.get("stage2_last_model_path")
+    if last_model_path and os.path.exists(last_model_path):
+        print(f"[t-SNE] Loading last checkpoint: {last_model_path}")
+        model.load_state_dict(torch.load(last_model_path, map_location=env["device"]))
+        print("[t-SNE] Generating visualization for last checkpoint...")
+        visualize_tsne(
+            model=model,
+            mapper=mapper,
+            processed_dir=processed_dir,
+            split="val",
+            device=env["device"],
+            save_dir=last_tsne_dir,
+        )
+    else:
+        print(f"[t-SNE] Skipping last-checkpoint visualization; not found: {last_model_path}")
 
 
 def main():
