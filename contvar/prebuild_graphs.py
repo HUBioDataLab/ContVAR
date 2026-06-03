@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -71,17 +72,31 @@ def _extract_embedding_array(value):
 
 
 class LocalEmbeddingStore:
-    """Lazy local lookup for per-residue ESM2 embeddings from H5 or .pt files."""
+    """Lazy local lookup for per-residue ESM2 embeddings from H5, .pt files, or ZIPs."""
 
     def __init__(
         self,
         embeddings_h5: Optional[os.PathLike | str] = None,
         embeddings_dir: Optional[os.PathLike | str] = None,
+        embeddings_zip: Optional[os.PathLike | str] = None,
     ):
-        self.embeddings_h5 = Path(embeddings_h5).expanduser().resolve() if embeddings_h5 else None
-        self.embeddings_dir = Path(embeddings_dir).expanduser().resolve() if embeddings_dir else None
+        h5_path = Path(embeddings_h5).expanduser().resolve() if embeddings_h5 else None
+        dir_path = Path(embeddings_dir).expanduser().resolve() if embeddings_dir else None
+        zip_path = Path(embeddings_zip).expanduser().resolve() if embeddings_zip else None
+        if h5_path and h5_path.suffix.lower() == ".zip" and zip_path is None:
+            zip_path = h5_path
+            h5_path = None
+        if dir_path and dir_path.suffix.lower() == ".zip" and zip_path is None:
+            zip_path = dir_path
+            dir_path = None
+
+        self.embeddings_h5 = h5_path
+        self.embeddings_dir = dir_path
+        self.embeddings_zip = zip_path
         self._h5 = None
         self._pt_index: Optional[Dict[str, Path]] = None
+        self._zip_extract_dir: Optional[Path] = None
+        self._zip_prepared = False
 
     def close(self) -> None:
         if self._h5 is not None:
@@ -94,7 +109,43 @@ class LocalEmbeddingStore:
     def __exit__(self, exc_type, exc, tb):
         self.close()
 
+    def _prepare_zip(self) -> None:
+        if self._zip_prepared:
+            return
+        self._zip_prepared = True
+        if not self.embeddings_zip:
+            return
+        if not self.embeddings_zip.is_file():
+            raise FileNotFoundError(f"ESM2 embeddings ZIP not found: {self.embeddings_zip}")
+
+        extract_root = (
+            self.embeddings_zip.parent / f"{self.embeddings_zip.stem}_unzipped"
+        ).resolve()
+        self._zip_extract_dir = extract_root
+        with zipfile.ZipFile(self.embeddings_zip, "r") as zf:
+            for member in zf.infolist():
+                target = (extract_root / member.filename).resolve()
+                if extract_root != target and extract_root not in target.parents:
+                    raise ValueError(
+                        f"Unsafe path inside embeddings ZIP: {member.filename}"
+                    )
+            if not extract_root.is_dir() or not any(extract_root.iterdir()):
+                extract_root.mkdir(parents=True, exist_ok=True)
+                zf.extractall(extract_root)
+
+        h5_files = sorted(
+            path
+            for path in extract_root.rglob("*")
+            if path.suffix.lower() in {".h5", ".hdf5"} and path.is_file()
+        )
+        pt_files = sorted(extract_root.rglob("*.pt"))
+        if self.embeddings_h5 is None and h5_files:
+            self.embeddings_h5 = h5_files[0]
+        if self.embeddings_dir is None and pt_files:
+            self.embeddings_dir = extract_root
+
     def _open_h5(self):
+        self._prepare_zip()
         if self.embeddings_h5 and self.embeddings_h5.is_file() and self._h5 is None:
             self._h5 = h5py.File(self.embeddings_h5, "r")
         return self._h5
@@ -103,6 +154,7 @@ class LocalEmbeddingStore:
         if self._pt_index is not None:
             return self._pt_index
 
+        self._prepare_zip()
         index: Dict[str, Path] = {}
         if self.embeddings_dir and self.embeddings_dir.is_dir():
             for path in self.embeddings_dir.rglob("*.pt"):
@@ -115,7 +167,13 @@ class LocalEmbeddingStore:
 
         h5_file = self._open_h5()
         if h5_file is not None:
-            for candidate in (key, protein_stem, protein_stem.lower(), protein_stem.upper()):
+            for candidate in (
+                key,
+                key.upper(),
+                protein_stem,
+                protein_stem.lower(),
+                protein_stem.upper(),
+            ):
                 if candidate in h5_file:
                     return np.asarray(h5_file[candidate])
 
@@ -134,6 +192,7 @@ class LocalGraphPrebuilder:
         config: Optional[ProjectConfig] = None,
         embeddings_h5: Optional[os.PathLike | str] = None,
         embeddings_dir: Optional[os.PathLike | str] = None,
+        embeddings_zip: Optional[os.PathLike | str] = None,
         require_embeddings: bool = True,
     ):
         self.output_dir = Path(output_dir).expanduser().resolve()
@@ -143,6 +202,7 @@ class LocalGraphPrebuilder:
         self.embedding_store = LocalEmbeddingStore(
             embeddings_h5=embeddings_h5,
             embeddings_dir=embeddings_dir,
+            embeddings_zip=embeddings_zip,
         )
         self.node_metadata_funcs = self.config.get_active_node_metadata_funcs()
         self.node_attributes = self.config.get_node_attributes_list()
@@ -396,6 +456,7 @@ def run_prebuild(
     output_dir: os.PathLike | str,
     embeddings_h5: Optional[os.PathLike | str] = None,
     embeddings_dir: Optional[os.PathLike | str] = None,
+    embeddings_zip: Optional[os.PathLike | str] = None,
     edge_mode: str = "salad",
     force: bool = False,
     total_chunks: int = 1,
@@ -425,6 +486,7 @@ def run_prebuild(
         config=cfg,
         embeddings_h5=embeddings_h5,
         embeddings_dir=embeddings_dir,
+        embeddings_zip=embeddings_zip,
         require_embeddings=require_embeddings,
     ) as builder:
         for cif_path in tqdm(selected_cifs, desc="Prebuilding graphs"):
@@ -452,6 +514,7 @@ def run_prebuild(
         "output_dir": str(output_path),
         "embeddings_h5": str(Path(embeddings_h5).resolve()) if embeddings_h5 else None,
         "embeddings_dir": str(Path(embeddings_dir).resolve()) if embeddings_dir else None,
+        "embeddings_zip": str(Path(embeddings_zip).resolve()) if embeddings_zip else None,
         "edge_mode": edge_mode,
         "total_cifs": len(all_cifs),
         "selected_cifs": len(selected_cifs),
@@ -481,6 +544,7 @@ def run_prebuild_and_inference(
     inference_output_dir: os.PathLike | str,
     embeddings_h5: Optional[os.PathLike | str] = None,
     embeddings_dir: Optional[os.PathLike | str] = None,
+    embeddings_zip: Optional[os.PathLike | str] = None,
     edge_mode: str = "salad",
     force: bool = False,
     total_chunks: int = 1,
@@ -539,6 +603,37 @@ def run_prebuild_and_inference(
     output_graphs = []
     pending: List[Tuple[str, Path, Data]] = []
     key_counts: Dict[str, int] = {}
+    meta_path = output_path / "prebuild_metadata.json"
+
+    def build_metadata(status: str) -> Dict[str, object]:
+        return {
+            "status": status,
+            "structure_dirs": [str(path) for path in _as_path_list(structure_dirs)],
+            "output_dir": str(output_path),
+            "inference_output_dir": str(inference_dir),
+            "embeddings_h5": str(Path(embeddings_h5).resolve()) if embeddings_h5 else None,
+            "embeddings_dir": str(Path(embeddings_dir).resolve()) if embeddings_dir else None,
+            "embeddings_zip": str(Path(embeddings_zip).resolve()) if embeddings_zip else None,
+            "edge_mode": edge_mode,
+            "save_graphs": save_graphs,
+            "total_cifs": len(all_cifs),
+            "selected_cifs": len(selected_cifs),
+            "total_chunks": total_chunks,
+            "chunk_id": chunk_id,
+            "unique_proteins": len({path.stem for path in all_cifs}),
+            "stats": dict(stats),
+            "failures": list(failures),
+            "output_graphs": list(output_graphs),
+            "inference_outputs": inference_outputs,
+        }
+
+    def write_metadata(path: Path, status: str) -> Dict[str, object]:
+        metadata = build_metadata(status=status)
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2)
+        return metadata
+
+    print(f"Metadata path: {meta_path}")
 
     h5_files: Dict[str, h5py.File] = {}
     try:
@@ -555,9 +650,11 @@ def run_prebuild_and_inference(
             config=cfg,
             embeddings_h5=embeddings_h5,
             embeddings_dir=embeddings_dir,
+            embeddings_zip=embeddings_zip,
             require_embeddings=require_embeddings,
         ) as builder:
-            for cif_path in tqdm(selected_cifs, desc="Prebuild + inference"):
+            progress = tqdm(selected_cifs, desc="Prebuild + inference")
+            for index, cif_path in enumerate(progress, start=1):
                 graph_path = output_path / f"{cif_path.stem}.pt"
                 try:
                     if graph_path.exists() and not force:
@@ -582,6 +679,17 @@ def run_prebuild_and_inference(
                             "error": f"{type(exc).__name__}: {exc}",
                         }
                     )
+                    if index == 1 or index % 25 == 0 or index == len(selected_cifs):
+                        progress.set_postfix(
+                            processed=stats["processed"],
+                            cached=stats["cached"],
+                            saved=stats["saved"],
+                            embedded=stats["embedded"],
+                            failed=stats["failed"],
+                            pending=len(pending),
+                            refresh=False,
+                        )
+
                     continue
 
                 key = _unique_h5_key(graph_path, key_counts)
@@ -600,6 +708,17 @@ def run_prebuild_and_inference(
                     stats["embedded"] += len(pending)
                     pending.clear()
 
+                if index == 1 or index % 25 == 0 or index == len(selected_cifs):
+                    progress.set_postfix(
+                        processed=stats["processed"],
+                        cached=stats["cached"],
+                        saved=stats["saved"],
+                        embedded=stats["embedded"],
+                        failed=stats["failed"],
+                        pending=len(pending),
+                        refresh=False,
+                    )
+
             if pending:
                 _write_streamed_embeddings(
                     models=models,
@@ -609,6 +728,15 @@ def run_prebuild_and_inference(
                 )
                 stats["embedded"] += len(pending)
                 pending.clear()
+                progress.set_postfix(
+                    processed=stats["processed"],
+                    cached=stats["cached"],
+                    saved=stats["saved"],
+                    embedded=stats["embedded"],
+                    failed=stats["failed"],
+                    pending=0,
+                    refresh=False,
+                )
 
         for h5_file in h5_files.values():
             h5_file.attrs["num_graphs"] = stats["embedded"]
@@ -616,33 +744,10 @@ def run_prebuild_and_inference(
         for h5_file in h5_files.values():
             h5_file.close()
 
-    if stats["embedded"] == 0:
-        raise RuntimeError(
-            f"No graph embeddings were produced. Check CIF inputs under {structure_dirs} "
-            "and failures in prebuild_metadata.json."
-        )
-
-    metadata = {
-        "structure_dirs": [str(path) for path in _as_path_list(structure_dirs)],
-        "output_dir": str(output_path),
-        "inference_output_dir": str(inference_dir),
-        "embeddings_h5": str(Path(embeddings_h5).resolve()) if embeddings_h5 else None,
-        "embeddings_dir": str(Path(embeddings_dir).resolve()) if embeddings_dir else None,
-        "edge_mode": edge_mode,
-        "save_graphs": save_graphs,
-        "total_cifs": len(all_cifs),
-        "selected_cifs": len(selected_cifs),
-        "total_chunks": total_chunks,
-        "chunk_id": chunk_id,
-        "unique_proteins": len({path.stem for path in all_cifs}),
-        "stats": stats,
-        "failures": failures,
-        "output_graphs": output_graphs,
-        "inference_outputs": inference_outputs,
-    }
-    meta_path = output_path / "prebuild_metadata.json"
-    with meta_path.open("w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, indent=2)
+    metadata = write_metadata(
+        meta_path,
+        status="failed" if stats["embedded"] == 0 else "complete",
+    )
 
     print(
         f"Streaming prebuild+inference complete: processed={stats['processed']}, "
@@ -650,6 +755,14 @@ def run_prebuild_and_inference(
         f"embedded={stats['embedded']}, failed={stats['failed']}"
     )
     print(f"Metadata: {meta_path}")
+    if stats["embedded"] == 0:
+        sample_errors = "; ".join(
+            failure["error"] for failure in failures[:5]
+        ) or "no per-file failures were recorded"
+        raise RuntimeError(
+            f"No graph embeddings were produced. Metadata was written to {meta_path}. "
+            f"First failure(s): {sample_errors}"
+        )
     return metadata
 
 
@@ -670,6 +783,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True, help="Directory for graph .pt files.")
     parser.add_argument("--embeddings-h5", help="Optional local per-protein ESM2 H5 file.")
     parser.add_argument("--embeddings-dir", help="Optional local directory of per-protein .pt embeddings.")
+    parser.add_argument(
+        "--embeddings-zip",
+        help="Optional ZIP containing an ESM2 H5 file or per-protein .pt embeddings.",
+    )
     parser.add_argument("--edge-mode", default="salad", choices=("salad", "graphein"))
     parser.add_argument("--force", action="store_true", help="Regenerate existing graph .pt files.")
     parser.add_argument(
@@ -715,6 +832,7 @@ def main(argv: Optional[Sequence[str]] = None):
             or str(Path(args.output_dir) / "embeddings"),
             embeddings_h5=args.embeddings_h5,
             embeddings_dir=args.embeddings_dir,
+            embeddings_zip=args.embeddings_zip,
             edge_mode=args.edge_mode,
             force=args.force,
             total_chunks=args.total_chunks,
@@ -731,6 +849,7 @@ def main(argv: Optional[Sequence[str]] = None):
         output_dir=args.output_dir,
         embeddings_h5=args.embeddings_h5,
         embeddings_dir=args.embeddings_dir,
+        embeddings_zip=args.embeddings_zip,
         edge_mode=args.edge_mode,
         force=args.force,
         total_chunks=args.total_chunks,
