@@ -15,7 +15,7 @@ Training uses metric learning on triplets from the same protein family:
 
 The model is trained to pull benign variants toward the WT and push pathogenic variants away, both globally and at the mutation position.
 
-A second stage trains feed-forward **decoders** on top of frozen protein embeddings to predict Gene Ontology (GO) annotations and to score variant-induced functional changes.
+A downstream **Phase 2 decoder** trains feed-forward networks on top of frozen protein embeddings to predict Gene Ontology (GO) annotations and to score variant-induced functional changes.
 
 ---
 
@@ -23,16 +23,16 @@ A second stage trains feed-forward **decoders** on top of frozen protein embeddi
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ Phase 0 (optional) — GO semantic-similarity pretraining                   │
-│   semantic_similarity/*.tsv + prebuilt GO graph .pt + protein split JSON  │
-│   → model_phase0_best_loss.pt                                             │
+│ Phase 0 — GO semantic-similarity pretraining                             │
+│   semantic_similarity/*.tsv + prebuilt GO graph .pt + protein split JSON │
+│   → model_phase0_best_loss.pt                                            │
 └───────────────────────────────┬─────────────────────────────────────────┘
-                                │ warm-start (optional)
+                                │ initialize Phase 1 from Phase 0 weights
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ Stage 2 — DMS triplet metric learning                                     │
-│   protein_triplets_data/ + ESM2 H5 + dms_protein_split.json              │
-│   → model_best_loss.pt, model_last.pt                                     │
+│ Phase 1 — DMS triplet metric learning                                    │
+│   protein_triplets_data/ + ESM2 H5 + dms_protein_split.json             │
+│   → model_best_loss.pt, model_last.pt                                    │
 └───────────────────────────────┬─────────────────────────────────────────┘
                                 │
           ┌─────────────────────┼─────────────────────┐
@@ -42,12 +42,14 @@ A second stage trains feed-forward **decoders** on top of frozen protein embeddi
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ Phase 2 decoder — GO term prediction & variant function scoring           │
-│   ESM / ContVAR H5 + GOA + UniRef split → decoder_best_*.pt               │
+│ Phase 2 decoder — GO term prediction & variant function scoring          │
+│   ESM / ContVAR H5 + GOA + UniRef split → decoder_best_*.pt              │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**End-to-end local entry point:** `python starter.py` runs Stage 2 training (and optionally Phase 0), then exports embeddings and generates t-SNE plots.
+The encoder is trained in two steps: **Phase 0** learns from GO semantic-similarity triplets on Swiss-Prot proteins, then **Phase 1** fine-tunes on DMS variant triplets. Phase 1 always starts from Phase 0 weights — either by training Phase 0 yourself, or by loading the published `model_phase0_best_loss.pt` checkpoint.
+
+**End-to-end local entry point:** `python starter.py` runs Phase 0 (when configured to train) and Phase 1, then exports embeddings and generates t-SNE plots.
 
 **Colab notebook:** `run.ipynb` walks through the same encoder pipeline with Google Drive data paths.
 
@@ -61,14 +63,14 @@ ContVAR/
 ├── run.ipynb                   # Colab reproduction notebook
 ├── setup.py
 ├── local_splits/
-│   └── dms_protein_split.json  # Fixed protein-family train/val/test split (tracked)
+│   └── dms_protein_split.json  # Fixed protein-family train/val/test split
 ├── contvar/                    # Encoder: model, training, graph building, inference
 │   ├── training.py             # train_pipeline()
 │   ├── go_pretraining.py       # Phase 0
 │   ├── prebuild_graphs.py      # Build PyG graphs from mmCIF + ESM2
 │   ├── inference.py            # Frozen-checkpoint embedding export
 │   └── export_embeddings.py    # Post-training H5 export
-└── phase2_decoder/             # GO decoder training, evaluation, variant prediction
+└── phase2_decoder/             # Phase 2: GO decoder training, evaluation, variant prediction
     ├── train.py
     ├── test_eval.py
     ├── benchmark_eval.py
@@ -76,7 +78,7 @@ ContVAR/
     └── grid_search.py
 ```
 
-Large data files and trained weights are **not** committed to git (see [Data requirements](#data-requirements)).
+This repository contains the training and evaluation code, together with fixed data splits. Datasets, prebuilt graphs, and trained model checkpoints are distributed with the project release (see [Data and model artifacts](#data-and-model-artifacts)).
 
 ---
 
@@ -115,11 +117,33 @@ wandb login
 
 ---
 
-## Data requirements
+## Data and model artifacts
 
-Place external files according to the layouts below. Obtain the DMS structures, ESM2 embeddings, GO resources, and prebuilt graphs from your project data release or data-preparation pipeline.
+Download the release bundle and place files according to the layouts below. The release includes trained encoder and decoder weights; exact download location will be listed in the project release page.
 
-### Stage 2 — DMS variant triplets (required for encoder training)
+### Published model checkpoints
+
+| Checkpoint | Stage |
+|------------|-------|
+| `model_phase0_best_loss.pt` | Phase 0 encoder (best validation loss) |
+| `model_phase0_last.pt` | Phase 0 encoder (final epoch) |
+| `model_best_loss.pt` | Phase 1 encoder (best validation loss) |
+| `model_last.pt` | Phase 1 encoder (final epoch) |
+| `decoder_best_{embedding}_{aspect}.pt` | Phase 2 decoder |
+
+To reproduce Phase 1 without re-running Phase 0 training, set `go_phase0_epochs` to `0` and point `go_phase0_init_checkpoint_path` at `model_phase0_best_loss.pt`. This is the workflow used in `run.ipynb`.
+
+### Phase 0 — GO pretraining data
+
+| Path | Purpose |
+|------|---------|
+| `semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv` | MF semantic-similarity triplets |
+| `semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv` | BP triplets |
+| `semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv` | CC triplets |
+| `<go_prebuilt_graph_root>/` | Directory tree of prebuilt PyG `.pt` graph files (one per Swiss-Prot protein) |
+| `local_splits/phase0_protein_split_removed_graphless.json` | `protein_to_split` mapping for GO proteins |
+
+### Phase 1 — DMS variant triplets
 
 ```text
 protein_triplets_data/
@@ -143,21 +167,7 @@ Additional files:
 
 The split JSON uses `family_to_split` keys that match WT filenames without extension (e.g. `blat_ecolx_stiffler_2015_p62593_wt_model`).
 
-### Phase 0 — GO pretraining (optional)
-
-Only needed when `go_phase0_epochs > 0`.
-
-| Path | Purpose |
-|------|---------|
-| `semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_mf.tsv` | MF semantic-similarity triplets |
-| `semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_bp.tsv` | BP triplets |
-| `semantic_similarity/semantic_similarity_swissprot_filtered_low0.2_high0.8_cc.tsv` | CC triplets |
-| `<go_prebuilt_graph_root>/` | Directory tree of prebuilt PyG `.pt` graph files (one per Swiss-Prot protein) |
-| `local_splits/phase0_protein_split_removed_graphless.json` | `protein_to_split` mapping for GO proteins |
-
-To **skip Phase 0 training** but still warm-start Stage 2, set `go_phase0_epochs` to `0` and point `go_phase0_init_checkpoint_path` at a saved Phase 0 checkpoint (see [Configuration](#configuration)).
-
-### Phase 2 decoder (optional downstream evaluation)
+### Phase 2 decoder data
 
 Place these files in the working directory (or update paths in `phase2_decoder/config.py`):
 
@@ -166,10 +176,10 @@ Place these files in the working directory (or update paths in `phase2_decoder/c
 | `goa_2025-12-04_swissprot_noiea.tsv` | Swiss-Prot GO annotations |
 | `esm2_t33_650M_UR50D_protein_embedding.h5` | ESM-2 protein embeddings |
 | `go_pretraining_contvar_embeddings.h5` | ContVAR embeddings after Phase 0 |
-| `stage2_best_pretraining_protein_embeddings.h5` | ContVAR embeddings after Stage 2 (`contvar_full`) |
+| `stage2_best_pretraining_protein_embeddings.h5` | ContVAR embeddings after Phase 1 (`contvar_full`) |
 | `protein_uniref50.tsv` | Protein → UniRef50 cluster mapping |
 | `phase0_go_split.json` | UniRef50 cluster → split assignment |
-| `go.obo` | GO hierarchy (optional propagation) |
+| `go.obo` | GO hierarchy (for optional propagation) |
 | `variant_specific_go_benchmark.tsv` | LOF/GOF benchmark (for `benchmark_eval`) |
 
 ---
@@ -185,8 +195,8 @@ STARTER_PATHS = {
     "dms_protein_split_json_path": "local_splits/dms_protein_split.json",
     "go_protein_split_json_path": "local_splits/phase0_protein_split_removed_graphless.json",
     "go_tsv_dir": "semantic_similarity",
-    "go_prebuilt_graph_root": "/path/to/prebuilt_go_graphs",   # must be a directory
-    "go_phase0_init_checkpoint_path": None,                      # or path to .pt checkpoint
+    "go_prebuilt_graph_root": "/path/to/prebuilt_go_graphs",   # directory of .pt graphs
+    "go_phase0_init_checkpoint_path": "model_phase0_best_loss.pt",
     # ... checkpoint and export paths ...
 }
 ```
@@ -194,15 +204,17 @@ STARTER_PATHS = {
 Important notes:
 
 - `go_prebuilt_graph_root` must be a **directory** of `.pt` graph files, not a model checkpoint.
-- `starter.py` sets `go_phase0_epochs: 200` by default. Set this to `0` for DMS-only training, or provide all Phase 0 data files above.
+- `starter.py` sets `go_phase0_epochs: 200` to train Phase 0 from scratch. Set `go_phase0_epochs: 0` and provide `go_phase0_init_checkpoint_path` to start Phase 1 from the published Phase 0 weights without retraining.
 - Hyperparameters (learning rate, margin, epochs, etc.) live in [`contvar/config.py`](contvar/config.py) (`ProjectConfig`).
 - Decoder paths and hyperparameters live in [`phase2_decoder/config.py`](phase2_decoder/config.py) (`DecoderConfig`).
+
+Note: internal code still uses `stage2_*` variable names for Phase 1 checkpoint paths — these refer to the same files (`model_best_loss.pt`, etc.).
 
 ---
 
 ## Running the pipeline
 
-### 1. Encoder training (recommended entry point)
+### 1. Full encoder training (recommended entry point)
 
 ```bash
 python starter.py
@@ -210,11 +222,12 @@ python starter.py
 
 This will:
 
-1. Run Phase 0 GO pretraining when `go_phase0_epochs > 0` and data paths are valid.
-2. Build or reuse cached graphs under `protein_triplets_data/processed/`.
-3. Train Stage 2 with streaming semi-hard negative mining (300 epochs by default).
-4. Save `model_best_loss.pt` (lowest validation loss) and `model_last.pt`.
-5. Export embeddings to `exports/` and write t-SNE plots to `visualizations/`.
+1. Train Phase 0 on GO semantic-similarity triplets (`go_phase0_epochs: 200` by default in `starter.py`).
+2. Initialize Phase 1 from the resulting Phase 0 weights.
+3. Build or reuse cached graphs under `protein_triplets_data/processed/`.
+4. Train Phase 1 with streaming semi-hard negative mining (300 epochs by default).
+5. Save `model_best_loss.pt` (lowest validation loss) and `model_last.pt`.
+6. Export embeddings to `exports/` and write t-SNE plots to `visualizations/`.
 
 Rebuild all processed graphs from scratch:
 
@@ -222,18 +235,17 @@ Rebuild all processed graphs from scratch:
 python starter.py --force
 ```
 
-### 2. DMS-only training (no Phase 0)
+### 2. Phase 1 from published Phase 0 checkpoint
 
-In `starter.py`, configure:
+To skip Phase 0 training and fine-tune directly from the released weights (as in `run.ipynb`):
 
 ```python
-"go_prebuilt_graph_root": None,
-"go_phase0_init_checkpoint_path": "model_go_pretraining_best_loss.pt",  # optional warm-start
+# In starter.py _build_config_overrides or via train_pipeline config dict:
+"go_phase0_epochs": 0,
+"go_phase0_init_checkpoint_path": "model_phase0_best_loss.pt",
 ```
 
-And in `_build_config_overrides`, set `"go_phase0_epochs": 0`.
-
-Or use `run.ipynb` / call `train_pipeline` directly with the same overrides (see notebook Step 4).
+Then run `python starter.py` or follow `run.ipynb`.
 
 ### 3. Build graphs from mmCIF structures
 
@@ -316,9 +328,9 @@ python -m phase2_decoder.grid_search --aspect F --embedding concat
 |----------|-------------|
 | `model_phase0_best_loss.pt` | Best Phase 0 encoder weights |
 | `model_phase0_last.pt` | Final Phase 0 encoder weights |
-| `model_best_loss.pt` | Best Stage 2 encoder (validation loss) |
-| `model_last.pt` | Final Stage 2 encoder |
-| `model_epoch_{N}.pt` | Periodic snapshots (epoch 80, then every 100) |
+| `model_best_loss.pt` | Best Phase 1 encoder (validation loss) |
+| `model_last.pt` | Final Phase 1 encoder |
+| `model_epoch_{N}.pt` | Periodic Phase 1 snapshots (epoch 80, then every 100) |
 | `exports/phase0_contvar_embeddings.h5` | Global embeddings for GO proteins |
 | `exports/dms_variant_contvar_embeddings.h5` | Global embeddings for DMS variants |
 | `visualizations/best/`, `visualizations/last/` | t-SNE plots (global vs local, baseline vs projected) |
@@ -338,9 +350,9 @@ Metrics logged to Weights & Biases include triplet loss, MRR, alignment, uniform
 
 | Item | Location |
 |------|----------|
-| DMS protein-family split | `local_splits/dms_protein_split.json` (version 2, committed) |
-| GO protein split | `local_splits/phase0_protein_split_removed_graphless.json` (provide locally) |
-| Decoder UniRef50 split | `phase0_go_split.json` (provide locally) |
+| DMS protein-family split | `local_splits/dms_protein_split.json` (version 2) |
+| GO protein split | `local_splits/phase0_protein_split_removed_graphless.json` |
+| Decoder UniRef50 split | `phase0_go_split.json` |
 | Random seed (GO split) | `go_split_seed = 42` in `ProjectConfig` |
 | Decoder seed | `seed = 42` in `DecoderConfig` |
 
@@ -348,7 +360,7 @@ Training is deterministic given fixed splits and seeds, but exact GPU numerics m
 
 ### Verification checklist
 
-Run these after preparing data to confirm the installation:
+Run these after preparing data and downloading the release artifacts:
 
 ```bash
 # 1. Package imports
@@ -375,7 +387,7 @@ python -m phase2_decoder.test_eval --aspect F --embedding esm
 - Edges: SALAD-style hybrid connectivity (default) or Graphein kNN
 - Two GATv2 layers with residual connections and edge features
 - Projection heads → 256-d global and local embeddings
-- Optional ontology-specific heads for Phase 0 (MF / BP / CC)
+- Ontology-specific heads for Phase 0 (MF / BP / CC)
 
 **Decoder (`FFNDecoder`):**
 
