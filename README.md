@@ -17,6 +17,21 @@ The model is trained to pull benign variants toward the WT and push pathogenic v
 
 A downstream **Phase 2 decoder** trains feed-forward networks on top of frozen protein embeddings to predict Gene Ontology (GO) annotations and to score variant-induced functional changes.
 
+## Web demo
+
+Try ContVAR without installing anything:
+
+**[https://huggingface.co/spaces/fd55/contvarspace](https://huggingface.co/spaces/fd55/contvarspace)**
+
+The demo supports two analysis modes:
+
+| Mode | Input | Output |
+|------|--------|--------|
+| **Protein structure only** | One PDB or CIF file | Thresholded GO term predictions (MF, BP, CC) with confidence scores |
+| **WT + variant** | Wild-type and variant PDB/CIF files | Per-term WT vs variant scores, delta, and gained / lost / stable functional changes |
+
+Both modes accept `.pdb` and `.cif` structures and include example files for quick testing. Predictions are reported when scores reach the model threshold (≥ 0.60); the WT vs variant mode additionally classifies terms as gained or lost using a score-delta threshold.
+
 ---
 
 ## Pipeline overview
